@@ -536,6 +536,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterCallbackData, now int64, yield func(string)) any {
 	awaitedID := req.Awaited
 	awaiterID := req.Awaiter
+	origin, _ := resolveOrigin(head.Origin, "", awaitedID)
 
 	// Reject self-callbacks: schema refinement, returns 400.
 	if awaiterID == awaitedID {
@@ -546,11 +547,8 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 		}
 	}
 
-	awaitedOrigin, _ := resolveOrigin(head.Origin, "", awaitedID)
-	awaiterOrigin, _ := resolveOrigin(head.Origin, "", awaiterID)
-
 	// 1. Read awaited promise (may eagerly timeout).
-	awaitedRow, err := h.readAndTryTimeout(awaitedID, awaitedOrigin, now, yield)
+	awaitedRow, err := h.readAndTryTimeout(awaitedID, origin, now, yield)
 	if err == gocql.ErrNotFound {
 		return Res[string]{
 			Kind: "promise.register_callback",
@@ -568,7 +566,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 	}
 
 	// 2. Read awaiter promise (may eagerly timeout).
-	awaiterRow, err := h.readAndTryTimeout(awaiterID, awaiterOrigin, now, yield)
+	awaiterRow, err := h.readAndTryTimeout(awaiterID, origin, now, yield)
 	if err == gocql.ErrNotFound {
 		return Res[string]{
 			Kind: "promise.register_callback",
@@ -598,11 +596,10 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 	if awaiterRow.Promise.State != "pending" || awaitedRow.Promise.State != "pending" {
 		if awaitedRow.Promise.State != "pending" {
 			if err := h.resumeCallbackAwaiter(
-				awaitedID, awaitedOrigin,
+				awaitedID, origin,
 				awaiterID,
-				awaiterRow.Promise.State,
-				awaiterRow.Task.State, awaiterRow.Task.Version, awaiterRow.Target,
-				awaiterRow.TaskResumes,
+				awaiterRow.Task.State,
+				awaiterRow.Task.Version, awaiterRow.Target,
 				awaiterRow.Promise.TimeoutAt,
 				now, yield,
 			); err != nil {
@@ -625,7 +622,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 	lwtRow := make(map[string]interface{})
 	applied, err := h.Session.Query(
 		`UPDATE promises SET callbacks = callbacks + ? WHERE origin = ? AND id = ? IF state = 'pending'`,
-		[]string{awaiterID}, awaitedOrigin, awaitedID,
+		[]string{awaiterID}, origin, awaitedID,
 	).MapScanCAS(lwtRow)
 	yield(LabelPromiseRegisterCallbackCommitAwaited)
 	if err != nil {
@@ -639,29 +636,13 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 
 	if !applied {
 		// Concurrent settle won — re-read and return current state.
-		pr, readErr := h.readPromise(awaitedID, awaitedOrigin, yield)
+		pr, readErr := h.readPromise(awaitedID, origin, yield)
 		if readErr != nil {
 			log.Printf("promise.register_callback concurrent readback(%s): %v", awaitedID, readErr)
 			return Res[string]{
 				Kind: "promise.register_callback",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
 				Data: readErr.Error(),
-			}
-		}
-		if err := h.resumeCallbackAwaiter(
-			awaitedID, awaitedOrigin,
-			awaiterID,
-			awaiterRow.Promise.State,
-			awaiterRow.Task.State, awaiterRow.Task.Version, awaiterRow.Target,
-			awaiterRow.TaskResumes,
-			awaiterRow.Promise.TimeoutAt,
-			now, yield,
-		); err != nil {
-			log.Printf("promise.register_callback resumeCallbackAwaiter (concurrent settle) (%s←%s): %v", awaitedID, awaiterID, err)
-			return Res[string]{
-				Kind: "promise.register_callback",
-				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-				Data: err.Error(),
 			}
 		}
 		return Res[PromiseRegisterCallbackResData]{
@@ -909,26 +890,17 @@ func (h *Handler) resumeCallbackAwaiter(
 	awaitedID string,
 	origin string,
 	awaiterID string,
-	awaiterState string,
 	taskState string,
 	taskVersion int,
 	target string,
-	taskResumes []string,
 	timeoutAt int64,
 	now int64,
 	yield func(string),
 ) error {
-	if taskState == "fulfilled" {
-		return nil
-	}
-
-	// Skip if the awaiter's own promise is logically expired.
-	addToResumes := !(awaiterState == "pending" && timeoutAt <= now)
-	if !addToResumes {
-		return nil
-	}
-
 	switch taskState {
+	case "fulfilled":
+		// no statement
+
 	case "suspended":
 		retryAt := now + RetryTimeout
 		if err := h.Session.Query(
@@ -963,7 +935,7 @@ func (h *Handler) resumeCallbackAwaiter(
 				h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, origin, awaiterID,
 			).Exec()
 			yield(LabelPromiseRegisterCallbackResumeRollback)
-			return nil
+			return fmt.Errorf("concurrent modification")
 		}
 		h.sendExecute(target, awaiterID, taskVersion)
 
@@ -972,8 +944,8 @@ func (h *Handler) resumeCallbackAwaiter(
 		applied, err := h.Session.Query(
 			`UPDATE promises SET task_resumes = task_resumes + ?
 			 WHERE origin = ? AND id = ?
-			 IF task_state = ? AND task_resumes = ?`,
-			[]string{awaitedID}, origin, awaiterID, taskState, taskResumes,
+			 IF task_state = ?`,
+			[]string{awaitedID}, origin, awaiterID, taskState,
 		).MapScanCAS(lwtRow)
 		yield(LabelPromiseRegisterCallbackResumeCommit)
 		if err != nil {

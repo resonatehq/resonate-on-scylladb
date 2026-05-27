@@ -799,22 +799,14 @@ func (s *Server) promiseRegisterCallback(now int64, awaitedOrigin, awaited, awai
 		// Awaited promise is already settled: EnqueueResume on the awaiter task.
 		t := s.getTask(awaiterOrigin, awaiter)
 		if t != nil && awaiterP.State == "pending" {
-			if awaiterP.TimeoutAt <= now {
-				if t.State == "suspended" {
-					t.State = "pending"
-					t.Resumes = make(map[string]struct{})
-					s.setTTimeout(TTimeout{awaiterOrigin, awaiter, 0, now + pendingRetryTTL})
-				}
-			} else {
-				switch t.State {
-				case "suspended":
-					t.State = "pending"
-					t.Resumes = map[string]struct{}{awaited: {}}
-					s.setTTimeout(TTimeout{awaiterOrigin, awaiter, 0, now + pendingRetryTTL})
-					s.sendExecute(awaiterP.Tags["resonate:target"], awaiter, t.Version)
-				case "pending", "acquired", "halted":
-					t.Resumes[awaited] = struct{}{}
-				}
+			switch t.State {
+			case "suspended":
+				t.State = "pending"
+				t.Resumes = map[string]struct{}{awaited: {}}
+				s.setTTimeout(TTimeout{awaiterOrigin, awaiter, 0, now + pendingRetryTTL})
+				s.sendExecute(awaiterP.Tags["resonate:target"], awaiter, t.Version)
+			case "pending", "acquired", "halted":
+				t.Resumes[awaited] = struct{}{}
 			}
 		}
 	}
@@ -1623,15 +1615,15 @@ func (s *Server) triggerCallbacks(origin, promiseID string, now int64) {
 		if awaiterP == nil || awaiterP.State != "pending" {
 			continue
 		}
-		expired := awaiterP.TimeoutAt <= now
-		if expired {
-			if t.State == "suspended" {
-				t.State = "pending"
-				t.Resumes = make(map[string]struct{})
-				s.setTTimeout(TTimeout{awaiterOrigin, awaiterID, 0, now + pendingRetryTTL})
-			}
-			continue
-		}
+		// expired := awaiterP.TimeoutAt <= now
+		// if expired {
+		// 	if t.State == "suspended" {
+		// 		t.State = "pending"
+		// 		t.Resumes = make(map[string]struct{})
+		// 		s.setTTimeout(TTimeout{awaiterOrigin, awaiterID, 0, now + pendingRetryTTL})
+		// 	}
+		// 	continue
+		// }
 		switch t.State {
 		case "suspended":
 			t.State = "pending"
