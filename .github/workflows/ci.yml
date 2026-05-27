@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Static checks: go vet + go build
+  # Runs without any external dependencies and gates all downstream jobs.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Diff — TestHandlerDiff. Sequential, no concurrency, no failures.
+  # 100 iter × 200 steps. Compares oracle vs handler at every step on response
+  # status, response data, and full state snap; checks static + transition
+  # invariants.
+  # ─────────────────────────────────────────────────────────────────────────────
+  diff:
+    name: Diff Test
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run diff test
+        run: |
+          docker compose -f docker-compose.test.yml --profile diff up --build \
+            --abort-on-container-exit \
+            --exit-code-from tester-diff \
+            --no-attach scylladb
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Kill — TestHandlerKillInvariants + TestRacePreinsertTickCreate.
+  # Cooperative-runner concurrency with random kills (p=0.3) at yield points;
+  # checks static invariants (with the accepted-orphans whitelist) after every
+  # kill. Race test is a single targeted kill + tick + retry regression.
+  # ─────────────────────────────────────────────────────────────────────────────
+  kill:
+    name: Kill-Window Tests
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run kill tests
+        run: |
+          docker compose -f docker-compose.test.yml --profile kill up --build \
+            --abort-on-container-exit \
+            --exit-code-from tester-kill \
+            --no-attach scylladb
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Integration — resonate-test suite against the ScyllaDB-backed server.
+  # ─────────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Checkout resonate-test
+        uses: actions/checkout@v6
+        with:
+          repository: resonatehq/resonate-test
+          token: ${{ secrets.TESTBED_TOKEN }}
+          path: test/resonate-test
+
+      - name: Run integration tests
+        run: make test
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Tear down
+        if: always()
+        run: make clean
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Linearizability — TestLinearizabilitySequential + TestLinearizabilityConcurrent.
+  # Sequential: 1000 iter × 250 ops, single-threaded, ~30s.
+  # Concurrent: capped at 200 iter × 250 ops × 10 workers in CI (~5-10m);
+  # run locally with the full `linearizability` profile for 1000 iter.
+  # ─────────────────────────────────────────────────────────────────────────────
+  linearizability:
+    name: Linearizability Tests
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run sequential linearizability test
+        run: |
+          docker compose -f docker-compose.test.yml --profile linearizability-sequential up --build \
+            --abort-on-container-exit \
+            --exit-code-from tester-linearizability-sequential \
+            --no-attach scylladb
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - name: Tear down after sequential
+        if: always()
+        run: docker compose down --volumes
+
+      - name: Run concurrent linearizability test
+        run: |
+          docker compose -f docker-compose.test.yml --profile linearizability-concurrent up --build \
+            --abort-on-container-exit \
+            --exit-code-from tester-linearizability-concurrent \
+            --no-attach scylladb
+        env:
+          DOCKER_BUILDKIT: "1"
+          RESONATE_TEST_ITERATIONS: "200"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes

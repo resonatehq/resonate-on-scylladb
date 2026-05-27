@@ -1,0 +1,26 @@
+services:
+  server:
+    build:
+      context: .
+      target: server
+    command: ["serve", "--debug"]
+    ports:
+      - "8001:8001"
+    environment:
+      - SCYLLADB_HOST=scylladb
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - server
+
+  scylladb:
+    image: scylladb/scylla:2026.1
+    command: --smp 1 --memory 512M --overprovisioned 1
+    ports:
+      - "9042:9042"
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
