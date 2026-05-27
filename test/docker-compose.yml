@@ -1,0 +1,51 @@
+services:
+  scylladb:
+    image: scylladb/scylla:2026.1
+    command: --smp 1 --memory 512M --overprovisioned 1
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - resonate
+
+  resonate-server:
+    build:
+      context: ..
+      target: server
+    command: ["serve", "--debug"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8001/ -H 'Content-Type: application/json' -d '{\"kind\":\"debug.start\",\"head\":{},\"data\":{}}' || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    networks:
+      - resonate
+
+  testbed:
+    build: ./resonate-test
+    command:
+      - --client
+      - http
+      - --config
+      - '{"baseUrl":"http://resonate-server:8001"}'
+      - --advertise-host
+      - testbed
+      - --eager
+      - --non-atomic-fence
+    depends_on:
+      resonate-server:
+        condition: service_healthy
+    networks:
+      - resonate
+
+networks:
+  resonate:
+    driver: bridge

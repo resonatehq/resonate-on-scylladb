@@ -1,0 +1,94 @@
+# Local bench rig: scylla + our server + k6 (from resonate-perf), all on one
+# network so the scenario script's xk6-server callbacks work.
+#
+# Usage:
+#   # 1. Clone the perf repo somewhere visible to docker:
+#   git clone https://github.com/resonatehq/resonate-perf /tmp/resonate-perf
+#
+#   # 2. Run the smoke profile:
+#   docker compose -f docker-compose.bench.yml \
+#     --profile bench up --build --abort-on-container-exit --exit-code-from k6
+#   docker compose -f docker-compose.bench.yml down
+#
+#   # Override duration / VUs:
+#   K6_DURATION=2m K6_VUS=5 docker compose -f docker-compose.bench.yml \
+#     --profile bench up --build --abort-on-container-exit --exit-code-from k6
+#
+# Schema is created by the server because we run it with --debug=true (single
+# Scylla node can't do RF≥3 anyway). The benchmark itself is *not* a debug-mode
+# benchmark — it's a smoke check that the wiring works.
+
+services:
+  scylladb:
+    image: scylladb/scylla:2026.1
+    command: --smp 1 --memory 512M --overprovisioned 1
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
+    profiles:
+      - bench
+
+  resonate:
+    build:
+      context: .
+      target: server
+    # Bootstrap schema with --debug=true on a *different* port (:8002, internal
+    # only), then SIGKILL it (no graceful shutdown gap), then exec the
+    # production-mode server (--debug=false) on :8001. The healthcheck below
+    # only passes once :8001 responds, so k6 won't connect until prod is up.
+    # Bootstrap uses a different port so there's no bind-conflict window.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "[bootstrap] applying schema with --debug=true on :8002"
+        /server serve --debug=true --addr=:8002 &
+        pid=$$!
+        sleep 8
+        kill -9 $$pid 2>/dev/null || true
+        wait $$pid 2>/dev/null || true
+        echo "[bootstrap] done; starting --debug=false on :8001 (production path)"
+        exec /server serve
+    environment:
+      - SCYLLADB_HOST=scylladb
+    healthcheck:
+      # Use promise.get (always returns 200, body says not_found) — debug.start
+      # is rejected when --debug=false, so don't rely on it.
+      test:
+        - CMD-SHELL
+        - >-
+          curl -sf -X POST http://localhost:8001/ -H 'Content-Type: application/json'
+          -d '{"kind":"promise.get","head":{},"data":{"id":"healthcheck"}}'
+          || exit 1
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 15s   # gives bootstrap (~8s) + prod startup time
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - bench
+
+  k6:
+    build:
+      context: /tmp/resonate-perf
+      dockerfile: Dockerfile
+    depends_on:
+      resonate:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://resonate:8001
+      TARGET_URL: http://resonate:8001
+      SERVER_HOST: k6
+      SERVER_PORT: 10000
+      VERSION: "2025-01-15"
+    command:
+      - run
+      - --vus=${K6_VUS:-2}
+      - --duration=${K6_DURATION:-1m}
+      - /scripts/scenario.js
+    profiles:
+      - bench

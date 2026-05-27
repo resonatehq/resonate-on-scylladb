@@ -1,0 +1,114 @@
+services:
+  server:
+    build:
+      context: .
+      target: server
+    ports:
+      - "8001:8001"
+    environment:
+      - SCYLLADB_HOST=scylladb
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - server
+
+  tester-linearizability:
+    build:
+      context: .
+      target: tester
+    command: ["-v", "-failfast", "-timeout", "60m", "-run", "TestLinearizability.*", "./internal/test/"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+      - RESONATE_TEST_SEED
+      - RESONATE_TEST_ITERATIONS
+      - RESONATE_TEST_OPERATIONS
+    volumes:
+      - /tmp/linearizability:/tmp
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - linearizability
+
+  tester-linearizability-sequential:
+    build:
+      context: .
+      target: tester
+    command: ["-v", "-failfast", "-timeout", "5m", "-run", "TestLinearizabilitySequential", "./internal/test/"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+      - RESONATE_TEST_SEED
+      - RESONATE_TEST_ITERATIONS
+      - RESONATE_TEST_OPERATIONS
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - linearizability-sequential
+
+  tester-linearizability-concurrent:
+    build:
+      context: .
+      target: tester
+    command: ["-v", "-failfast", "-timeout", "30m", "-run", "TestLinearizabilityConcurrent", "./internal/test/"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+      - RESONATE_TEST_SEED
+      - RESONATE_TEST_ITERATIONS
+      - RESONATE_TEST_OPERATIONS
+    volumes:
+      - /tmp/linearizability:/tmp
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - linearizability-concurrent
+
+  tester-diff:
+    build:
+      context: .
+      target: tester
+    command: ["-v", "-failfast", "-timeout", "60m", "-run", "TestHandlerDiff", "./internal/test/"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+      - RESONATE_TEST_SEED
+      - RESONATE_TEST_ITERATIONS
+      - RESONATE_TEST_OPERATIONS
+      - RESONATE_TEST_PROMISES
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - diff
+
+  tester-kill:
+    build:
+      context: .
+      target: tester
+    command: ["-v", "-failfast", "-timeout", "60m", "-run", "TestHandlerKillInvariants|TestRacePreinsertTickCreate|TestDeterminism", "./internal/test/"]
+    environment:
+      - SCYLLADB_HOST=scylladb
+      - RESONATE_TEST_SEED
+      - RESONATE_TEST_ITERATIONS
+      - RESONATE_TEST_OPERATIONS
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    profiles:
+      - kill
+
+  scylladb:
+    image: scylladb/scylla:2026.1
+    command: --smp 1 --memory 512M --overprovisioned 1
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 5s
+      retries: 10
+      start_period: 30s
