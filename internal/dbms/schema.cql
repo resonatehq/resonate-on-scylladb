@@ -80,9 +80,3 @@ CREATE TABLE IF NOT EXISTS workers (
     worker_id UUID,
     PRIMARY KEY (worker_id)
 );
-
--- Secondary indexes for filtered scans
-
-CREATE INDEX IF NOT EXISTS promises_state_idx ON promises(state);
-CREATE INDEX IF NOT EXISTS promises_task_state_idx ON promises(task_state);
-CREATE INDEX IF NOT EXISTS schedules_promise_tags_entries_idx ON schedules(ENTRIES(promise_tags));
