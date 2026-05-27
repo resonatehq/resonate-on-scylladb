@@ -555,8 +555,6 @@ func (h *Handler) enqueueResume(
 
 	// One UPDATE per awaiter.
 	for _, a := range awaiters {
-		// addToResumes is false when the awaiter's promise is logically expired.
-		addToResumes := !(a.state == "pending" && a.timeoutAt <= now)
 		retryAt := now + RetryTimeout
 
 		switch a.taskState {
@@ -564,21 +562,14 @@ func (h *Handler) enqueueResume(
 			// no statement
 
 		case "suspended":
-			resumes := []string{settledID}
-			if !addToResumes {
-				resumes = []string{}
-			}
 			batch.Query(
 				`UPDATE promises SET task_state = 'pending', task_resumes = ?, task_timeout_retry = ?
 				 WHERE origin = ? AND id = ?
 				 IF task_state = 'suspended'`,
-				resumes, retryAt, origin, a.id,
+				[]string{settledID}, retryAt, origin, a.id,
 			)
 
 		case "halted":
-			if !addToResumes {
-				continue
-			}
 			batch.Query(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
@@ -587,9 +578,6 @@ func (h *Handler) enqueueResume(
 			)
 
 		case "pending":
-			if !addToResumes {
-				continue
-			}
 			batch.Query(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
@@ -598,9 +586,6 @@ func (h *Handler) enqueueResume(
 			)
 
 		case "acquired":
-			if !addToResumes {
-				continue
-			}
 			batch.Query(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
@@ -641,7 +626,7 @@ func (h *Handler) enqueueResume(
 	// 7. On success: collect suspended awaiters for the caller to send execute messages.
 	resumeAwaiters := make([]resumeAwaiter, 0)
 	for _, a := range awaiters {
-		if a.taskState == "suspended" && !(a.state == "pending" && a.timeoutAt <= now) {
+		if a.taskState == "suspended" {
 			resumeAwaiters = append(resumeAwaiters, resumeAwaiter{
 				target:      a.target,
 				id:          a.id,
@@ -670,7 +655,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 
 	var settleStmt string
 	var settleArgs []interface{}
-	if in.Target != "" && in.TaskState != "" && in.TaskState != "fulfilled" {
+	if in.Target != "" {
 		settleStmt = `UPDATE promises SET
 		     state = ?, settled_at = ?,
 		     value_headers = null, value_data = null,
@@ -724,7 +709,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 			log.Printf("tryTimeout: delete promise_timeouts(%s): %v", in.ID, delErr)
 		}
 		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
-		if in.Target != "" && in.TaskState != "" && in.TaskState != "fulfilled" {
+		if in.Target != "" {
 			if in.TaskTRetry != nil {
 				if delErr := h.Session.Query(
 					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
