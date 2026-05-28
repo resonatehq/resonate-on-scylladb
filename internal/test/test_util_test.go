@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math/rand"
 	"os"
@@ -17,18 +18,40 @@ import (
 	"github.com/resonateio/resonate-on-scylladb/internal/dbms"
 )
 
+var (
+	testScyllaHosts       = stringArrayFlag{values: []string{"localhost"}}
+	testScyllaPort        int
+	testScyllaUsername    string
+	testScyllaPassword    string
+	testScyllaTLS         bool
+	testScyllaTLSInsecure bool
+	testScyllaKeyspace    string
+	testScyllaReplication string
+)
+
+func init() {
+	flag.Var(&testScyllaHosts, "scylladb-host", "ScyllaDB seed host (host or host:port); repeat for multiple seeds")
+	flag.IntVar(&testScyllaPort, "scylladb-port", 0, "default CQL port for seeds without an explicit port and for gossip-discovered peers (0 = let gocql default to 9042)")
+	flag.StringVar(&testScyllaUsername, "scylladb-username", "", "ScyllaDB username")
+	flag.StringVar(&testScyllaPassword, "scylladb-password", "", "ScyllaDB password")
+	flag.BoolVar(&testScyllaTLS, "scylladb-tls", false, "enable TLS")
+	flag.BoolVar(&testScyllaTLSInsecure, "scylladb-tls-insecure", false, "skip certificate verification (only honored when -scylladb-tls is set)")
+	flag.StringVar(&testScyllaKeyspace, "scylladb-keyspace", "", "keyspace name (defaults to \"resonate\")")
+	flag.StringVar(&testScyllaReplication, "scylladb-replication", "", "replication fragment for CREATE KEYSPACE")
+}
+
 func setupHandler(t *testing.T) *core.Handler {
 	t.Helper()
 	cfg := dbms.Config{
 		Hosts:        testHosts(),
 		Port:         testPort(),
-		Username:     os.Getenv("SCYLLADB_USERNAME"),
-		Password:     os.Getenv("SCYLLADB_PASSWORD"),
-		TLS:          os.Getenv("SCYLLADB_TLS") == "1" || strings.EqualFold(os.Getenv("SCYLLADB_TLS"), "true"),
-		TLSInsecure:  os.Getenv("SCYLLADB_TLS_INSECURE") == "1" || strings.EqualFold(os.Getenv("SCYLLADB_TLS_INSECURE"), "true"),
-		Keyspace:     os.Getenv("SCYLLADB_KEYSPACE"),
+		Username:     testStringFlag("scylladb-username", "SCYLLADB_USERNAME", testScyllaUsername),
+		Password:     testStringFlag("scylladb-password", "SCYLLADB_PASSWORD", testScyllaPassword),
+		TLS:          testBoolFlag("scylladb-tls", "SCYLLADB_TLS", testScyllaTLS),
+		TLSInsecure:  testBoolFlag("scylladb-tls-insecure", "SCYLLADB_TLS_INSECURE", testScyllaTLSInsecure),
+		Keyspace:     testStringFlag("scylladb-keyspace", "SCYLLADB_KEYSPACE", testScyllaKeyspace),
 		CreateSchema: true,
-		Replication:  os.Getenv("SCYLLADB_REPLICATION"),
+		Replication:  testStringFlag("scylladb-replication", "SCYLLADB_REPLICATION", testScyllaReplication),
 	}
 	session, err := dbms.Connect(cfg)
 	if err != nil {
@@ -47,31 +70,27 @@ func setupHandler(t *testing.T) *core.Handler {
 	}
 }
 
-// testHosts resolves the seed list for tests. SCYLLADB_HOSTS (comma-separated,
-// host or host:port) wins; otherwise SCYLLADB_HOST (single host) with default
-// port; otherwise localhost.
+// testHosts resolves the seed list for tests. The repeatable -scylladb-host
+// flag wins; otherwise SCYLLADB_HOSTS, SCYLLADB_HOST, then localhost.
 func testHosts() []string {
+	if testScyllaHosts.changed {
+		return testScyllaHosts.values
+	}
 	if v := os.Getenv("SCYLLADB_HOSTS"); v != "" {
-		parts := strings.Split(v, ",")
-		out := make([]string, 0, len(parts))
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p != "" {
-				out = append(out, p)
-			}
-		}
-		return out
+		return splitScyllaHosts(v)
 	}
 	host := os.Getenv("SCYLLADB_HOST")
 	if host == "" {
-		host = "localhost"
+		return testScyllaHosts.values
 	}
 	return []string{host}
 }
 
-// testPort returns the SCYLLADB_PORT env var as int, or 0 (let dbms default
-// to 9042).
+// testPort returns -scylladb-port, SCYLLADB_PORT, or 0 (let dbms default to 9042).
 func testPort() int {
+	if testFlagChanged("scylladb-port") {
+		return testScyllaPort
+	}
 	v := os.Getenv("SCYLLADB_PORT")
 	if v == "" {
 		return 0
@@ -81,6 +100,65 @@ func testPort() int {
 		return 0
 	}
 	return n
+}
+
+func testStringFlag(flagName, envName, flagValue string) string {
+	if testFlagChanged(flagName) {
+		return flagValue
+	}
+	return os.Getenv(envName)
+}
+
+func testBoolFlag(flagName, envName string, flagValue bool) bool {
+	if testFlagChanged(flagName) {
+		return flagValue
+	}
+	return envBool(envName)
+}
+
+func testFlagChanged(name string) bool {
+	changed := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			changed = true
+		}
+	})
+	return changed
+}
+
+func envBool(name string) bool {
+	v := os.Getenv(name)
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+func splitScyllaHosts(v string) []string {
+	parts := strings.Split(v, ",")
+	hosts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			hosts = append(hosts, p)
+		}
+	}
+	return hosts
+}
+
+type stringArrayFlag struct {
+	values  []string
+	changed bool
+}
+
+func (f *stringArrayFlag) Set(v string) error {
+	if !f.changed {
+		f.values = nil
+		f.changed = true
+	}
+	f.values = append(f.values, strings.TrimSpace(v))
+	return nil
+}
+
+func (f *stringArrayFlag) String() string {
+	return strings.Join(f.values, ",")
 }
 
 // envInt returns the env var parsed as a positive int, or fallback if unset,

@@ -84,6 +84,8 @@ func (h *Handler) TickPromiseTimeoutsAt(ctx context.Context, t int64, shard int1
 				return
 			default:
 			}
+			log.Printf("timeout.process kind=promise shard=%d bucket=%d timeout_at=%d origin=%s id=%s",
+				shard, b, ptTimeout, ptOrigin, ptID)
 			if err := h.onPromiseTimeout(ptOrigin, ptID, ptTimeout, yield); err != nil {
 				log.Printf("TickPromiseTimeoutsAt shard %d: onPromiseTimeout(%s): %v", shard, ptID, err)
 			}
@@ -121,10 +123,14 @@ func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, 
 				ttOrigin = ttID
 			}
 			if ttType == 0 {
+				log.Printf("timeout.process kind=task_retry shard=%d bucket=%d timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
+					shard, b, ttTimeout, ttOrigin, ttID, ttPromiseTimeoutAt)
 				if err := h.onTaskRetryTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
 					log.Printf("TickTaskTimeoutsAt shard %d: onTaskRetryTimeout(%s): %v", shard, ttID, err)
 				}
 			} else {
+				log.Printf("timeout.process kind=task_lease shard=%d bucket=%d timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
+					shard, b, ttTimeout, ttOrigin, ttID, ttPromiseTimeoutAt)
 				if err := h.onTaskLeaseTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
 					log.Printf("TickTaskTimeoutsAt shard %d: onTaskLeaseTimeout(%s): %v", shard, ttID, err)
 				}
@@ -161,6 +167,8 @@ func (h *Handler) TickScheduleTimeoutsAt(ctx context.Context, t int64, shard int
 			if stOrigin == "" {
 				stOrigin = stID
 			}
+			log.Printf("timeout.process kind=schedule shard=%d bucket=%d timeout_at=%d origin=%s id=%s token=%s",
+				shard, b, stTimeout, stOrigin, stID, stToken)
 			if err := h.onScheduleTimeout(stOrigin, stID, stTimeout, stToken, t, yield); err != nil {
 				log.Printf("TickScheduleTimeoutsAt shard %d: onScheduleTimeout(%s): %v", shard, stID, err)
 			}
@@ -229,6 +237,8 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		})
 
 		for _, e := range due {
+			log.Printf("timeout.process kind=promise debug=true timeout_at=%d origin=%s id=%s",
+				e.timeoutAt, e.origin, e.id)
 			if err := h.onPromiseTimeout(e.origin, e.id, e.timeoutAt, yield); err != nil {
 				log.Printf("debugTickAt: onPromiseTimeout(%s): %v", e.id, err)
 			}
@@ -280,10 +290,14 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 
 		for _, e := range due {
 			if e.ttype == 0 {
+				log.Printf("timeout.process kind=task_retry debug=true timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
+					e.timeoutAt, e.origin, e.id, e.promiseTimeoutAt)
 				if err := h.onTaskRetryTimeout(e.origin, e.id, e.timeoutAt, e.promiseTimeoutAt, t, yield); err != nil {
 					log.Printf("debugTickAt: onTaskRetryTimeout(%s): %v", e.id, err)
 				}
 			} else {
+				log.Printf("timeout.process kind=task_lease debug=true timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
+					e.timeoutAt, e.origin, e.id, e.promiseTimeoutAt)
 				if err := h.onTaskLeaseTimeout(e.origin, e.id, e.timeoutAt, e.promiseTimeoutAt, t, yield); err != nil {
 					log.Printf("debugTickAt: onTaskLeaseTimeout(%s): %v", e.id, err)
 				}
@@ -334,6 +348,8 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		})
 
 		for _, e := range due {
+			log.Printf("timeout.process kind=schedule debug=true timeout_at=%d origin=%s id=%s token=%s",
+				e.timeoutAt, e.origin, e.scheduleID, e.token)
 			if err := h.onScheduleTimeout(e.origin, e.scheduleID, e.timeoutAt, e.token, t, yield); err != nil {
 				log.Printf("debugTickAt: onScheduleTimeout(%s): %v", e.scheduleID, err)
 			}

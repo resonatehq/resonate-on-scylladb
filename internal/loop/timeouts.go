@@ -12,9 +12,6 @@ import (
 	"github.com/resonateio/resonate-on-scylladb/internal/core"
 )
 
-const defaultWorkerTTL = 30_000 // milliseconds
-const workerTTLDivisor = 5      // interval = workerTTL / workerTTLDivisor
-
 // TimeoutProcessor manages worker registration, shard assignment, and per-shard
 // timeout processing goroutines. Implements base.Background.
 type TimeoutProcessor struct {
@@ -22,22 +19,19 @@ type TimeoutProcessor struct {
 	interval  time.Duration
 	workerID  gocql.UUID
 	shards    int
-	workerTTL int // milliseconds; TTL for the workers table row
+	workerTTL time.Duration
 
 	stop chan struct{}
 	once sync.Once
 }
 
-func NewTimeoutProcessor(handler *core.Handler, workerID gocql.UUID, shards, workerTTL int) *TimeoutProcessor {
+func NewTimeoutProcessor(handler *core.Handler, workerID gocql.UUID, shards int, workerTTL, tickInterval time.Duration) *TimeoutProcessor {
 	if shards <= 0 {
 		shards = 1
 	}
-	if workerTTL <= 0 {
-		workerTTL = defaultWorkerTTL
-	}
 	return &TimeoutProcessor{
 		handler:   handler,
-		interval:  time.Duration(workerTTL/workerTTLDivisor) * time.Millisecond,
+		interval:  tickInterval,
 		workerID:  workerID,
 		shards:    shards,
 		workerTTL: workerTTL,
@@ -81,7 +75,7 @@ func (p *TimeoutProcessor) coordinator() {
 		// 1. Upsert heartbeat.
 		if err := p.handler.Session.Query(
 			`INSERT INTO workers (worker_id) VALUES (?) USING TTL ?`,
-			p.workerID, p.workerTTL/1000,
+			p.workerID, int(p.workerTTL.Seconds()),
 		).Exec(); err != nil {
 			// Non-fatal: if the upsert fails we still process our last known shards.
 			_ = err
