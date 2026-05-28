@@ -1,5 +1,5 @@
 CREATE KEYSPACE IF NOT EXISTS resonate
-    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 3};
 
 USE resonate;
 
