@@ -3,7 +3,7 @@ package cmds
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,8 +34,23 @@ func ServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			var logLevel slog.LevelVar
+			switch strings.ToLower(cfg.Server.LogLevel) {
+			case "debug":
+				logLevel.Set(slog.LevelDebug)
+			case "warn":
+				logLevel.Set(slog.LevelWarn)
+			case "error":
+				logLevel.Set(slog.LevelError)
+			default:
+				logLevel.Set(slog.LevelInfo)
+			}
+			logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: &logLevel}))
+			slog.SetDefault(logger)
+
 			for _, w := range warnings {
-				log.Print(w)
+				slog.Warn(w)
 			}
 
 			dbCfg := dbms.Config{
@@ -85,7 +100,7 @@ func ServeCmd() *cobra.Command {
 				b.Init()
 			}
 			if cfg.Server.Debug {
-				log.Printf("debug mode: keyspace recreated, debug endpoints enabled")
+				slog.Info("debug mode: keyspace recreated, debug endpoints enabled")
 			}
 
 			srv := &http.Server{
@@ -98,22 +113,23 @@ func ServeCmd() *cobra.Command {
 			}
 
 			go func() {
-				log.Printf("listening on %s", cfg.Server.Addr)
+				slog.Info("listening on", "addr", cfg.Server.Addr)
 				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					log.Fatalf("listen: %v", err)
+					slog.Error("listen", "err", err)
+					os.Exit(1)
 				}
 			}()
 
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 			<-quit
-			log.Println("shutting down")
+			slog.Info("shutting down")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
 			if err := srv.Shutdown(ctx); err != nil {
-				log.Printf("server shutdown: %v", err)
+				slog.Error("server shutdown", "err", err)
 			}
 			for _, b := range h.Backgrounds {
 				b.Stop()

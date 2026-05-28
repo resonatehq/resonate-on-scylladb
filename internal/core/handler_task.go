@@ -2,7 +2,7 @@ package core
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/gocql/gocql"
 )
@@ -30,7 +30,7 @@ func (h *Handler) TaskGet(head RequestHead, req TaskGetData, now int64, yield fu
 		}
 	}
 	if err != nil {
-		log.Printf("task.get read(%s): %v", id, err)
+		slog.Error("task.get read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.get",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -138,7 +138,7 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
 			h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, id, origin,
 		).Exec(); err != nil {
-			log.Printf("task.create: pre-insert promise_timeouts(%s): %v", id, err)
+			slog.Error("task.create: pre-insert promise_timeouts", "id", id, "err", err)
 			return Res[string]{
 				Kind: "task.create",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -151,7 +151,7 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
 				h.BucketFor(*taskLease), h.shardFor(id), *taskLease, id, origin, *inner.TimeoutAt,
 			).Exec(); err != nil {
-				log.Printf("task.create: pre-insert task_timeouts lease(%s): %v", id, err)
+				slog.Error("task.create: pre-insert task_timeouts lease", "id", id, "err", err)
 				return Res[string]{
 					Kind: "task.create",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -194,7 +194,7 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 	).MapScanCAS(row)
 	yield(LabelTaskCreateCommit)
 	if err != nil {
-		log.Printf("task.create LWT(%s): %v", id, err)
+		slog.Error("task.create LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -404,7 +404,7 @@ func (h *Handler) taskCreateConflict(
 		}
 		sd, tryErr := h.tryTimeout(in, now, yield)
 		if tryErr != nil {
-			log.Printf("task.create tryTimeout(%s): %v", id, tryErr)
+			slog.Warn("task.create tryTimeout", "id", id, "err", tryErr)
 			return Res[string]{Kind: "task.create", Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version}, Data: tryErr.Error()}
 		}
 		settledAtFinal := sd.SettledAt
@@ -467,7 +467,7 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 		}
 	}
 	if err != nil {
-		log.Printf("task.acquire read(%s): %v", id, err)
+		slog.Error("task.acquire read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.acquire",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -510,7 +510,7 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
 		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, origin, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
-		log.Printf("task.acquire: pre-insert lease timeout(%s): %v", id, err)
+		slog.Error("task.acquire: pre-insert lease timeout", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.acquire",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -537,7 +537,7 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 	).MapScanCAS(lwtRow)
 	yield(LabelTaskAcquireCommit)
 	if err != nil {
-		log.Printf("task.acquire LWT(%s): %v", id, err)
+		slog.Error("task.acquire LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.acquire",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -630,7 +630,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 		}
 	}
 	if err != nil {
-		log.Printf("task.release read(%s): %v", id, err)
+		slog.Error("task.release read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.release",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -663,7 +663,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
 		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
-		log.Printf("task.release: pre-insert retry timeout(%s): %v", id, err)
+		slog.Error("task.release: pre-insert retry timeout", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.release",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -688,7 +688,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 	).MapScanCAS(lwtRow)
 	yield(LabelTaskReleaseCommit)
 	if err != nil {
-		log.Printf("task.release LWT(%s): %v", id, err)
+		slog.Error("task.release LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.release",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -735,7 +735,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
 			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("task.release: delete lease timeout(%s): %v", id, delErr)
+			slog.Warn("task.release: delete lease timeout", "id", id, "err", delErr)
 		}
 		yield(LabelTaskReleaseCleanupTaskTimeoutsLease)
 	}
@@ -835,7 +835,7 @@ func (h *Handler) TaskFence(head RequestHead, req TaskFenceData, now int64, yiel
 		}
 	}
 	if err != nil {
-		log.Printf("task.fence read(%s): %v", id, err)
+		slog.Error("task.fence read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.fence",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -887,7 +887,7 @@ func (h *Handler) TaskFence(head RequestHead, req TaskFenceData, now int64, yiel
 	// 6. Marshal inner action result and return wrapped response.
 	actionBytes, err := json.Marshal(actionResult)
 	if err != nil {
-		log.Printf("task.fence marshal action result: %v", err)
+		slog.Error("task.fence marshal action result", "err", err)
 		return Res[string]{
 			Kind: "task.fence",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -928,7 +928,7 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 		row, err := h.readAndTryTimeout(id, origin, now, yield)
 		if err != nil {
 			if err != gocql.ErrNotFound {
-				log.Printf("task.heartbeat read(%s): %v", id, err)
+				slog.Error("task.heartbeat read", "id", id, "err", err)
 				return Res[string]{
 					Kind: "task.heartbeat",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -960,7 +960,7 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 			 VALUES (?, ?, ?, 1, ?, ?, ?)`,
 			h.BucketFor(newLease), h.shardFor(id), newLease, id, origin, row.Promise.TimeoutAt,
 		).Exec(); err != nil {
-			log.Printf("task.heartbeat: pre-insert lease timeout(%s): %v", id, err)
+			slog.Error("task.heartbeat: pre-insert lease timeout", "id", id, "err", err)
 			return Res[string]{
 				Kind: "task.heartbeat",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -979,7 +979,7 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 		).MapScanCAS(lwtRow)
 		yield(LabelTaskHeartbeatCommit)
 		if err != nil {
-			log.Printf("task.heartbeat LWT(%s): %v", id, err)
+			slog.Error("task.heartbeat LWT", "id", id, "err", err)
 			return Res[string]{
 				Kind: "task.heartbeat",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1071,7 +1071,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 		}
 	}
 	if err != nil {
-		log.Printf("task.suspend read(%s): %v", id, err)
+		slog.Error("task.suspend read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.suspend",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1138,7 +1138,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 			}
 		}
 		if err != nil {
-			log.Printf("task.suspend: read awaited(%s → %s): %v", id, awaitedID, err)
+			slog.Error("task.suspend: read awaited", "id", id, "awaited_id", awaitedID, "err", err)
 			return Res[string]{
 				Kind: "task.suspend",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1169,7 +1169,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 				Callbacks:  ar.callbacks,
 			}
 			if _, tryErr := h.tryTimeout(in, now, yield); tryErr != nil {
-				log.Printf("task.suspend tryTimeout awaited(%s): %v", in.ID, tryErr)
+				slog.Warn("task.suspend tryTimeout awaited", "id", in.ID, "err", tryErr)
 				return Res[string]{Kind: "task.suspend", Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version}, Data: tryErr.Error()}
 			}
 			ar.state = "settled"
@@ -1184,7 +1184,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 			).MapScanCAS(clearRow)
 			yield(LabelTaskSuspendClearResumes)
 			if clearErr != nil {
-				log.Printf("task.suspend clear resumes LWT(%s): %v", id, clearErr)
+				slog.Warn("task.suspend clear resumes LWT", "id", id, "err", clearErr)
 				return Res[string]{
 					Kind: "task.suspend",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1242,7 +1242,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 	}
 	yield(LabelTaskSuspendCommit)
 	if err != nil {
-		log.Printf("task.suspend batch LWT(%s): %v", id, err)
+		slog.Error("task.suspend batch LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.suspend",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1264,7 +1264,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
 			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
 		).Exec(); err != nil {
-			log.Printf("task.suspend: delete lease timeout(%s): %v", id, err)
+			slog.Warn("task.suspend: delete lease timeout", "id", id, "err", err)
 		}
 		yield(LabelTaskSuspendCleanupTaskTimeoutsLease)
 	}
@@ -1305,7 +1305,7 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 		}
 	}
 	if err != nil {
-		log.Printf("task.fulfill read(%s): %v", id, err)
+		slog.Error("task.fulfill read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.fulfill",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1385,7 +1385,7 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 		}
 	}
 	if enqErr != nil {
-		log.Printf("task.fulfill enqueueResume(%s): %v", id, enqErr)
+		slog.Error("task.fulfill enqueueResume", "id", id, "err", enqErr)
 		return Res[string]{
 			Kind: "task.fulfill",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1458,7 +1458,7 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 		}
 	}
 	if err != nil {
-		log.Printf("task.halt read(%s): %v", id, err)
+		slog.Error("task.halt read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.halt",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1504,7 +1504,7 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 	yield(LabelTaskHaltCommit)
 
 	if err != nil {
-		log.Printf("task.halt LWT(%s): %v", id, err)
+		slog.Error("task.halt LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.halt",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1526,7 +1526,7 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 				Data: "Task is already fulfilled",
 			}
 		default:
-			log.Printf("task.halt LWT(%s): unexpected task_state=%v", id, lwtRow["task_state"])
+			slog.Error("task.halt LWT unexpected task_state", "id", id, "task_state", lwtRow["task_state"])
 			return Res[string]{
 				Kind: "task.halt",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1589,7 +1589,7 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 		}
 	}
 	if err != nil {
-		log.Printf("task.continue read(%s): %v", id, err)
+		slog.Error("task.continue read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.continue",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1613,7 +1613,7 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
 		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
-		log.Printf("task.continue: pre-insert retry timeout(%s): %v", id, err)
+		slog.Error("task.continue: pre-insert retry timeout", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.continue",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1635,7 +1635,7 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 	).MapScanCAS(lwtRow)
 	yield(LabelTaskContinueCommit)
 	if err != nil {
-		log.Printf("task.continue LWT(%s): %v", id, err)
+		slog.Error("task.continue LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.continue",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1695,7 +1695,7 @@ func (h *Handler) taskCreateReacquire(
 		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
 		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, origin, existingTimeoutAt,
 	).Exec(); err != nil {
-		log.Printf("task.create re-acquire: pre-insert lease timeout(%s): %v", id, err)
+		slog.Error("task.create re-acquire: pre-insert lease timeout", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -1723,7 +1723,7 @@ func (h *Handler) taskCreateReacquire(
 	).MapScanCAS(reRow)
 	yield(LabelTaskCreateCommit)
 	if err != nil {
-		log.Printf("task.create re-acquire LWT(%s): %v", id, err)
+		slog.Error("task.create re-acquire LWT", "id", id, "err", err)
 		return Res[string]{
 			Kind: "task.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},

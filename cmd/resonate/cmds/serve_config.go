@@ -11,8 +11,9 @@ import (
 
 type serveConfig struct {
 	Server struct {
-		Addr  string `mapstructure:"addr"`
-		Debug bool   `mapstructure:"debug"`
+		Addr     string `mapstructure:"addr"`
+		Debug    bool   `mapstructure:"debug"`
+		LogLevel string `mapstructure:"log-level"`
 	} `mapstructure:"server"`
 
 	ScyllaDB struct {
@@ -92,6 +93,7 @@ func loadServeConfig(cmd *cobra.Command, configPath string) (serveConfig, []stri
 func setServeDefaults(v *viper.Viper) {
 	v.SetDefault("server.addr", ":8001")
 	v.SetDefault("server.debug", false)
+	v.SetDefault("server.log-level", "info")
 	v.SetDefault("scylladb.hosts", []string{"localhost"})
 	v.SetDefault("scylladb.port", 0)
 	v.SetDefault("scylladb.username", "")
@@ -111,6 +113,7 @@ func bindServeFlags(v *viper.Viper, cmd *cobra.Command) error {
 	bindings := [][2]string{
 		{"server.addr", "addr"},
 		{"server.debug", "debug"},
+		{"server.log-level", "log-level"},
 		{"scylladb.hosts", "scylladb-host"},
 		{"scylladb.port", "scylladb-port"},
 		{"scylladb.username", "scylladb-username"},
@@ -134,6 +137,12 @@ func bindServeFlags(v *viper.Viper, cmd *cobra.Command) error {
 }
 
 func validateServeConfig(cfg *serveConfig, warnings *[]string) error {
+	switch strings.ToLower(cfg.Server.LogLevel) {
+	case "debug", "info", "warn", "error":
+		// ok
+	default:
+		return fmt.Errorf("server.log-level must be debug, info, warn, or error; got %q", cfg.Server.LogLevel)
+	}
 	if cfg.Timeouts.BucketWidth <= 0 {
 		return fmt.Errorf("timeouts.bucket-width must be > 0, got %v", cfg.Timeouts.BucketWidth)
 	}
@@ -175,4 +184,5 @@ func registerServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Duration("worker-ttl", 15*time.Second, "worker row TTL (e.g. 15s, 1m); must be greater than 0")
 	cmd.Flags().Duration("worker-tick-interval", time.Second, "coordinator and table-loop tick interval (e.g. 6s, 1m); should be less than worker-ttl")
 	cmd.Flags().Bool("debug", false, "debug mode; recreates schema and enables debug endpoints")
+	cmd.Flags().String("log-level", "info", "log level (debug, info, warn, error)")
 }

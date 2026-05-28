@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"text/template"
 	"time"
@@ -125,7 +125,7 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 		`INSERT INTO schedule_timeouts (bucket, shard, timeout_at, schedule_id, origin, create_token) VALUES (?, ?, ?, ?, ?, ?)`,
 		h.BucketFor(nextRunAt), h.shardFor(*data.ID), nextRunAt, *data.ID, origin, token,
 	).Exec(); err != nil {
-		log.Printf("schedule.create: pre-insert schedule_timeouts(%s): %v", *data.ID, err)
+		slog.Error("schedule.create: pre-insert schedule_timeouts", "id", *data.ID, "err", err)
 		return Res[string]{
 			Kind: "schedule.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -148,7 +148,7 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 	).MapScanCAS(row)
 	yield(LabelScheduleCreateCommit)
 	if err != nil {
-		log.Printf("schedule.create LWT(%s): %v", *data.ID, err)
+		slog.Error("schedule.create LWT", "id", *data.ID, "err", err)
 		return Res[string]{
 			Kind: "schedule.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -228,7 +228,7 @@ func (h *Handler) ScheduleGet(head RequestHead, data ScheduleGetData, now int64,
 	origin, _ := resolveOrigin(head.Origin, "", data.ID)
 	rec, err := readScheduleRow(h.Session, origin, data.ID, yield)
 	if err != nil {
-		log.Printf("schedule.get(%s): %v", data.ID, err)
+		slog.Error("schedule.get", "id", data.ID, "err", err)
 		return Res[string]{
 			Kind: "schedule.get",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -270,7 +270,7 @@ func (h *Handler) ScheduleDelete(head RequestHead, data ScheduleDeleteData, now 
 			Data: "Schedule not found",
 		}
 	} else if err != nil {
-		log.Printf("schedule.delete read(%s): %v", data.ID, err)
+		slog.Error("schedule.delete read", "id", data.ID, "err", err)
 		return Res[string]{
 			Kind: "schedule.delete",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -285,7 +285,7 @@ func (h *Handler) ScheduleDelete(head RequestHead, data ScheduleDeleteData, now 
 	).MapScanCAS(row)
 	yield(LabelScheduleDeleteCommit)
 	if err != nil {
-		log.Printf("schedule.delete LWT(%s): %v", data.ID, err)
+		slog.Error("schedule.delete LWT", "id", data.ID, "err", err)
 		return Res[string]{
 			Kind: "schedule.delete",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -311,7 +311,7 @@ func (h *Handler) ScheduleDelete(head RequestHead, data ScheduleDeleteData, now 
 		`DELETE FROM schedule_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND schedule_id = ? AND create_token = ?`,
 		h.BucketFor(nextRunAt), h.shardFor(data.ID), nextRunAt, origin, data.ID, token,
 	).Exec(); err != nil {
-		log.Printf("schedule.delete cleanup schedule_timeouts(%s): %v", data.ID, err)
+		slog.Warn("schedule.delete cleanup schedule_timeouts", "id", data.ID, "err", err)
 	}
 	yield(LabelScheduleDeleteCleanupScheduleTimeouts)
 
@@ -336,7 +336,7 @@ func (h *Handler) onScheduleTimeout(origin, id string, timeoutAt int64, token go
 				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND schedule_id = ? AND create_token = ?`,
 				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id, token,
 			).Exec(); delErr != nil {
-				log.Printf("onScheduleTimeout: delete schedule_timeouts(%s at %d): %v", id, timeoutAt, delErr)
+				slog.Warn("onScheduleTimeout: delete schedule_timeouts", "id", id, "timeout_at", timeoutAt, "err", delErr)
 			}
 			yield(LabelScheduleTimeoutCleanupScheduleTimeouts)
 		}
@@ -376,7 +376,7 @@ func (h *Handler) onScheduleTimeout(origin, id string, timeoutAt int64, token go
 	for currentT <= now {
 		promiseID, tmplErr := expandScheduleTemplate(rec.PromiseID, id, currentT)
 		if tmplErr != nil {
-			log.Printf("onScheduleTimeout(%s): template error at %d: %v", id, currentT, tmplErr)
+			slog.Error("onScheduleTimeout: template error", "id", id, "time", currentT, "err", tmplErr)
 			return tmplErr
 		}
 		occurrences = append(occurrences, occurrence{currentT, promiseID})
@@ -504,7 +504,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 		).MapScanCAS(row)
 		yield(LabelScheduleTimeoutCommitPromises)
 		if err != nil {
-			log.Printf("createSchedulePromise born-expired(%s): %v", promiseID, err)
+			slog.Error("createSchedulePromise born-expired", "id", promiseID, "err", err)
 			return false
 		}
 		return true
@@ -517,7 +517,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 		`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
 		h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID, promiseID,
 	).Exec(); err != nil {
-		log.Printf("createSchedulePromise: pre-insert promise_timeouts(%s): %v", promiseID, err)
+		slog.Error("createSchedulePromise: pre-insert promise_timeouts", "id", promiseID, "err", err)
 		return false
 	}
 	yield(LabelScheduleTimeoutPreinsertPromiseTimeouts)
@@ -530,7 +530,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
 			h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID, promiseID, timeoutAt,
 		).Exec(); err != nil {
-			log.Printf("createSchedulePromise: pre-insert task_timeouts(%s): %v", promiseID, err)
+			slog.Error("createSchedulePromise: pre-insert task_timeouts", "id", promiseID, "err", err)
 			return false
 		}
 		yield(LabelScheduleTimeoutPreinsertTaskTimeoutsRetry)
@@ -590,7 +590,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	}
 	yield(LabelScheduleTimeoutCommitPromises)
 	if err != nil {
-		log.Printf("createSchedulePromise(%s): %v", promiseID, err)
+		slog.Error("createSchedulePromise", "id", promiseID, "err", err)
 		h.Session.Query(
 			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
 			h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID, promiseID,

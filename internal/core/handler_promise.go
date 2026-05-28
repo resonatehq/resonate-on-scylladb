@@ -3,7 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 
@@ -27,7 +27,7 @@ func (h *Handler) PromiseGet(head RequestHead, req PromiseGetData, now int64, yi
 		}
 	}
 	if err != nil {
-		log.Printf("promise.get read(%s): %v", id, err)
+		slog.Error("promise.get read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "promise.get",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -320,7 +320,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
 			h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id, origin,
 		).Exec(); err != nil {
-			log.Printf("promise.create: pre-insert promise_timeouts(%s): %v", id, err)
+			slog.Error("promise.create: pre-insert promise_timeouts", "id", id, "err", err)
 			return Res[PromiseCreateResData]{
 				Kind: "promise.create",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -332,7 +332,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
 				h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id, origin, *req.TimeoutAt,
 			).Exec(); err != nil {
-				log.Printf("promise.create: pre-insert task_timeouts(%s): %v", id, err)
+				slog.Error("promise.create: pre-insert task_timeouts", "id", id, "err", err)
 				return Res[PromiseCreateResData]{
 					Kind: "promise.create",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -374,7 +374,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	).MapScanCAS(row)
 	yield(LabelPromiseCreateCommit)
 	if err != nil {
-		log.Printf("promise.create LWT(%s): %v", id, err)
+		slog.Error("promise.create LWT", "id", id, "err", err)
 		return Res[PromiseCreateResData]{
 			Kind: "promise.create",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -462,7 +462,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 			}
 			sd, tryErr := h.tryTimeout(in, now, yield)
 			if tryErr != nil {
-				log.Printf("promise.create tryTimeout(%s): %v", id, tryErr)
+				slog.Warn("promise.create tryTimeout", "id", id, "err", tryErr)
 				return Res[PromiseCreateResData]{
 					Kind: "promise.create",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -557,7 +557,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 		}
 	}
 	if err != nil {
-		log.Printf("promise.register_callback read awaited(%s): %v", awaitedID, err)
+		slog.Error("promise.register_callback read awaited", "id", awaitedID, "err", err)
 		return Res[string]{
 			Kind: "promise.register_callback",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -575,7 +575,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 		}
 	}
 	if err != nil {
-		log.Printf("promise.register_callback read awaiter(%s): %v", awaiterID, err)
+		slog.Error("promise.register_callback read awaiter", "id", awaiterID, "err", err)
 		return Res[string]{
 			Kind: "promise.register_callback",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -603,7 +603,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 				awaiterRow.Promise.TimeoutAt,
 				now, yield,
 			); err != nil {
-				log.Printf("promise.register_callback resumeCallbackAwaiter(%s←%s): %v", awaitedID, awaiterID, err)
+				slog.Error("promise.register_callback resumeCallbackAwaiter", "awaited_id", awaitedID, "awaiter_id", awaiterID, "err", err)
 				return Res[string]{
 					Kind: "promise.register_callback",
 					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -626,7 +626,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 	).MapScanCAS(lwtRow)
 	yield(LabelPromiseRegisterCallbackCommitAwaited)
 	if err != nil {
-		log.Printf("promise.register_callback LWT(%s←%s): %v", awaitedID, awaiterID, err)
+		slog.Error("promise.register_callback LWT", "awaited_id", awaitedID, "awaiter_id", awaiterID, "err", err)
 		return Res[string]{
 			Kind: "promise.register_callback",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -638,7 +638,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 		// Concurrent settle won — re-read and return current state.
 		pr, readErr := h.readPromise(awaitedID, origin, yield)
 		if readErr != nil {
-			log.Printf("promise.register_callback concurrent readback(%s): %v", awaitedID, readErr)
+			slog.Warn("promise.register_callback concurrent readback", "id", awaitedID, "err", readErr)
 			return Res[string]{
 				Kind: "promise.register_callback",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -679,7 +679,7 @@ func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterL
 		}
 	}
 	if err != nil {
-		log.Printf("promise.register_listener read(%s): %v", awaitedID, err)
+		slog.Error("promise.register_listener read", "id", awaitedID, "err", err)
 		return Res[string]{
 			Kind: "promise.register_listener",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -704,7 +704,7 @@ func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterL
 	).MapScanCAS(lwtRow)
 	yield(LabelPromiseRegisterListenerCommit)
 	if err != nil {
-		log.Printf("promise.register_listener LWT(%s): %v", awaitedID, err)
+		slog.Error("promise.register_listener LWT", "id", awaitedID, "err", err)
 		return Res[string]{
 			Kind: "promise.register_listener",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -716,7 +716,7 @@ func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterL
 		// Concurrent settle won — re-read and return current state.
 		pr, readErr := h.readPromise(awaitedID, awaitedOrigin, yield)
 		if readErr != nil {
-			log.Printf("promise.register_listener concurrent readback(%s): %v", awaitedID, readErr)
+			slog.Warn("promise.register_listener concurrent readback", "id", awaitedID, "err", readErr)
 			return Res[string]{
 				Kind: "promise.register_listener",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -756,7 +756,7 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 		}
 	}
 	if err != nil {
-		log.Printf("promise.settle read(%s): %v", id, err)
+		slog.Error("promise.settle read", "id", id, "err", err)
 		return Res[string]{
 			Kind: "promise.settle",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
@@ -824,7 +824,7 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 
 	// 6. Handle result.
 	if enqErr != nil {
-		log.Printf("promise.settle enqueueResume(%s): %v", id, enqErr)
+		slog.Error("promise.settle enqueueResume", "id", id, "err", enqErr)
 		return Res[string]{
 			Kind: "promise.settle",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},

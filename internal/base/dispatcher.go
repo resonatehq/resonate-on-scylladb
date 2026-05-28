@@ -1,7 +1,7 @@
 package base
 
 import (
-	"log"
+	"log/slog"
 	"net/url"
 )
 
@@ -25,12 +25,12 @@ func (d *Dispatcher) Register(t Transport, schemes ...string) {
 func (d *Dispatcher) Send(address string, payload []byte) {
 	u, err := url.Parse(address)
 	if err != nil {
-		log.Printf("dispatcher: invalid address %q: %v", address, err)
+		slog.Warn("dispatcher: invalid address", "address", address, "err", err)
 		return
 	}
 	t, ok := d.routes[u.Scheme]
 	if !ok {
-		log.Printf("dispatcher: no transport for scheme %q, message dropped", u.Scheme)
+		slog.Warn("dispatcher: no transport for scheme, message dropped", "scheme", u.Scheme)
 		return
 	}
 	t.Send(address, payload)
