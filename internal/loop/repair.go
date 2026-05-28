@@ -1,7 +1,7 @@
 package loop
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -85,7 +85,7 @@ func (r *Repair) tick() {
 				`INSERT INTO promise_timeouts (bucket, timeout_at, origin, promise_id) VALUES (?, ?, ?, ?)`,
 				r.handler.BucketFor(timeoutAt), timeoutAt, origin, id,
 			).Exec(); err != nil {
-				log.Printf("repair: insert promise_timeouts(%s): %v", id, err)
+				slog.Error("repair: insert promise_timeouts", "id", id, "err", err)
 			}
 		}
 
@@ -95,7 +95,7 @@ func (r *Repair) tick() {
 				`INSERT INTO task_timeouts (bucket, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, 0, ?, ?, ?)`,
 				r.handler.BucketFor(*taskTimeoutRetry), *taskTimeoutRetry, id, origin, timeoutAt,
 			).Exec(); err != nil {
-				log.Printf("repair: insert task retry timeout(%s): %v", id, err)
+				slog.Error("repair: insert task retry timeout", "id", id, "err", err)
 			}
 		}
 
@@ -105,12 +105,12 @@ func (r *Repair) tick() {
 				`INSERT INTO task_timeouts (bucket, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, 1, ?, ?, ?)`,
 				r.handler.BucketFor(*taskTimeoutLease), *taskTimeoutLease, id, origin, timeoutAt,
 			).Exec(); err != nil {
-				log.Printf("repair: insert task lease timeout(%s): %v", id, err)
+				slog.Error("repair: insert task lease timeout", "id", id, "err", err)
 			}
 		}
 	}
 
 	if err := iter.Close(); err != nil {
-		log.Printf("repair: scan promises: %v", err)
+		slog.Error("repair: scan promises", "err", err)
 	}
 }

@@ -2,7 +2,7 @@ package core
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 
 	"github.com/gocql/gocql"
 	"github.com/resonateio/resonate-on-scylladb/internal/base"
@@ -98,7 +98,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			}
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debug.snap: promises scan: %v", err)
+			slog.Error("debug.snap: promises scan", "err", err)
 		}
 	}
 
@@ -121,7 +121,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debug.snap: promise_timeouts scan: %v", err)
+			slog.Error("debug.snap: promise_timeouts scan", "err", err)
 		}
 	}
 
@@ -146,7 +146,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debug.snap: task_timeouts scan: %v", err)
+			slog.Error("debug.snap: task_timeouts scan", "err", err)
 		}
 	}
 
@@ -193,7 +193,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debug.snap: schedules scan: %v", err)
+			slog.Error("debug.snap: schedules scan", "err", err)
 		}
 	}
 
@@ -216,7 +216,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debug.snap: schedule_timeouts scan: %v", err)
+			slog.Error("debug.snap: schedule_timeouts scan", "err", err)
 		}
 	}
 

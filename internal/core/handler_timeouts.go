@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
-	"log"
+	"log/slog"
 	"sort"
 
 	"github.com/gocql/gocql"
@@ -84,14 +84,13 @@ func (h *Handler) TickPromiseTimeoutsAt(ctx context.Context, t int64, shard int1
 				return
 			default:
 			}
-			log.Printf("timeout.process kind=promise shard=%d bucket=%d timeout_at=%d origin=%s id=%s",
-				shard, b, ptTimeout, ptOrigin, ptID)
+			slog.Debug("timeout.process", "kind", "promise", "shard", shard, "bucket", b, "timeout_at", ptTimeout, "origin", ptOrigin, "id", ptID)
 			if err := h.onPromiseTimeout(ptOrigin, ptID, ptTimeout, yield); err != nil {
-				log.Printf("TickPromiseTimeoutsAt shard %d: onPromiseTimeout(%s): %v", shard, ptID, err)
+				slog.Error("TickPromiseTimeoutsAt: onPromiseTimeout", "shard", shard, "id", ptID, "err", err)
 			}
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("TickPromiseTimeoutsAt: promise_timeouts scan bucket %d shard %d: %v", b, shard, err)
+			slog.Error("TickPromiseTimeoutsAt: promise_timeouts scan bucket", "bucket", b, "shard", shard, "err", err)
 		}
 	}
 }
@@ -123,21 +122,19 @@ func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, 
 				ttOrigin = ttID
 			}
 			if ttType == 0 {
-				log.Printf("timeout.process kind=task_retry shard=%d bucket=%d timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
-					shard, b, ttTimeout, ttOrigin, ttID, ttPromiseTimeoutAt)
+				slog.Debug("timeout.process", "kind", "task_retry", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "origin", ttOrigin, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
 				if err := h.onTaskRetryTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
-					log.Printf("TickTaskTimeoutsAt shard %d: onTaskRetryTimeout(%s): %v", shard, ttID, err)
+					slog.Error("TickTaskTimeoutsAt: onTaskRetryTimeout", "shard", shard, "id", ttID, "err", err)
 				}
 			} else {
-				log.Printf("timeout.process kind=task_lease shard=%d bucket=%d timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
-					shard, b, ttTimeout, ttOrigin, ttID, ttPromiseTimeoutAt)
+				slog.Debug("timeout.process", "kind", "task_lease", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "origin", ttOrigin, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
 				if err := h.onTaskLeaseTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
-					log.Printf("TickTaskTimeoutsAt shard %d: onTaskLeaseTimeout(%s): %v", shard, ttID, err)
+					slog.Error("TickTaskTimeoutsAt: onTaskLeaseTimeout", "shard", shard, "id", ttID, "err", err)
 				}
 			}
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("TickTaskTimeoutsAt: task_timeouts scan bucket %d shard %d: %v", b, shard, err)
+			slog.Error("TickTaskTimeoutsAt: task_timeouts scan bucket", "bucket", b, "shard", shard, "err", err)
 		}
 	}
 }
@@ -167,14 +164,13 @@ func (h *Handler) TickScheduleTimeoutsAt(ctx context.Context, t int64, shard int
 			if stOrigin == "" {
 				stOrigin = stID
 			}
-			log.Printf("timeout.process kind=schedule shard=%d bucket=%d timeout_at=%d origin=%s id=%s token=%s",
-				shard, b, stTimeout, stOrigin, stID, stToken)
+			slog.Debug("timeout.process", "kind", "schedule", "shard", shard, "bucket", b, "timeout_at", stTimeout, "origin", stOrigin, "id", stID, "token", stToken)
 			if err := h.onScheduleTimeout(stOrigin, stID, stTimeout, stToken, t, yield); err != nil {
-				log.Printf("TickScheduleTimeoutsAt shard %d: onScheduleTimeout(%s): %v", shard, stID, err)
+				slog.Error("TickScheduleTimeoutsAt: onScheduleTimeout", "shard", shard, "id", stID, "err", err)
 			}
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("TickScheduleTimeoutsAt: schedule_timeouts scan bucket %d shard %d: %v", b, shard, err)
+			slog.Error("TickScheduleTimeoutsAt: schedule_timeouts scan bucket", "bucket", b, "shard", shard, "err", err)
 		}
 	}
 }
@@ -226,7 +222,7 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 			due = append(due, ptEntry{ptTimeout, ptOrigin, ptID})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debugTickAt: promise_timeouts scan: %v", err)
+			slog.Error("debugTickAt: promise_timeouts scan", "err", err)
 		}
 
 		sort.Slice(due, func(i, j int) bool {
@@ -237,10 +233,9 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		})
 
 		for _, e := range due {
-			log.Printf("timeout.process kind=promise debug=true timeout_at=%d origin=%s id=%s",
-				e.timeoutAt, e.origin, e.id)
+			slog.Debug("timeout.process", "kind", "promise", "debug", true, "timeout_at", e.timeoutAt, "origin", e.origin, "id", e.id)
 			if err := h.onPromiseTimeout(e.origin, e.id, e.timeoutAt, yield); err != nil {
-				log.Printf("debugTickAt: onPromiseTimeout(%s): %v", e.id, err)
+				slog.Error("debugTickAt: onPromiseTimeout", "id", e.id, "err", err)
 			}
 		}
 	}
@@ -275,7 +270,7 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 			due = append(due, ttEntry{ttTimeout, ttType, ttID, ttOrigin, ttPromiseTimeoutAt})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debugTickAt: task_timeouts scan: %v", err)
+			slog.Error("debugTickAt: task_timeouts scan", "err", err)
 		}
 
 		sort.Slice(due, func(i, j int) bool {
@@ -290,16 +285,14 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 
 		for _, e := range due {
 			if e.ttype == 0 {
-				log.Printf("timeout.process kind=task_retry debug=true timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
-					e.timeoutAt, e.origin, e.id, e.promiseTimeoutAt)
+				slog.Debug("timeout.process", "kind", "task_retry", "debug", true, "timeout_at", e.timeoutAt, "origin", e.origin, "id", e.id, "promise_timeout_at", e.promiseTimeoutAt)
 				if err := h.onTaskRetryTimeout(e.origin, e.id, e.timeoutAt, e.promiseTimeoutAt, t, yield); err != nil {
-					log.Printf("debugTickAt: onTaskRetryTimeout(%s): %v", e.id, err)
+					slog.Error("debugTickAt: onTaskRetryTimeout", "id", e.id, "err", err)
 				}
 			} else {
-				log.Printf("timeout.process kind=task_lease debug=true timeout_at=%d origin=%s id=%s promise_timeout_at=%d",
-					e.timeoutAt, e.origin, e.id, e.promiseTimeoutAt)
+				slog.Debug("timeout.process", "kind", "task_lease", "debug", true, "timeout_at", e.timeoutAt, "origin", e.origin, "id", e.id, "promise_timeout_at", e.promiseTimeoutAt)
 				if err := h.onTaskLeaseTimeout(e.origin, e.id, e.timeoutAt, e.promiseTimeoutAt, t, yield); err != nil {
-					log.Printf("debugTickAt: onTaskLeaseTimeout(%s): %v", e.id, err)
+					slog.Error("debugTickAt: onTaskLeaseTimeout", "id", e.id, "err", err)
 				}
 			}
 		}
@@ -334,7 +327,7 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 			due = append(due, schedEntry{stTimeout, stID, stOrigin, stToken})
 		}
 		if err := iter.Close(); err != nil {
-			log.Printf("debugTickAt: schedule_timeouts scan: %v", err)
+			slog.Error("debugTickAt: schedule_timeouts scan", "err", err)
 		}
 
 		sort.Slice(due, func(i, j int) bool {
@@ -348,10 +341,9 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		})
 
 		for _, e := range due {
-			log.Printf("timeout.process kind=schedule debug=true timeout_at=%d origin=%s id=%s token=%s",
-				e.timeoutAt, e.origin, e.scheduleID, e.token)
+			slog.Debug("timeout.process", "kind", "schedule", "debug", true, "timeout_at", e.timeoutAt, "origin", e.origin, "id", e.scheduleID, "token", e.token)
 			if err := h.onScheduleTimeout(e.origin, e.scheduleID, e.timeoutAt, e.token, t, yield); err != nil {
-				log.Printf("debugTickAt: onScheduleTimeout(%s): %v", e.scheduleID, err)
+				slog.Error("debugTickAt: onScheduleTimeout", "id", e.scheduleID, "err", err)
 			}
 		}
 	}
@@ -412,7 +404,7 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
 			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("onPromiseTimeout: delete promise_timeouts(%s): %v", id, delErr)
+			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
 		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
 		return nil
@@ -427,7 +419,7 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
 			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("onPromiseTimeout: delete promise_timeouts(%s): %v", id, delErr)
+			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
 		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
 		return nil
@@ -439,7 +431,7 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
 			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("onPromiseTimeout: delete promise_timeouts(%s): %v", id, delErr)
+			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
 		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
 		return nil
@@ -542,7 +534,7 @@ func (h *Handler) enqueueResume(
 				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
 				h.BucketFor(p.retryAt), h.shardFor(p.awaiterID), p.retryAt, origin, p.awaiterID,
 			).Exec(); err != nil {
-				log.Printf("enqueueResume: rollback task_timeouts(%s): %v", p.awaiterID, err)
+				slog.Error("enqueueResume: rollback task_timeouts", "id", p.awaiterID, "err", err)
 			}
 			yield(LabelEnqueueResumeRollbackTaskTimeoutsRetry)
 		}
@@ -722,7 +714,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
 			h.BucketFor(in.TimeoutAt), h.shardFor(in.ID), in.TimeoutAt, in.Origin, in.ID,
 		).Exec(); delErr != nil {
-			log.Printf("tryTimeout: delete promise_timeouts(%s): %v", in.ID, delErr)
+			slog.Warn("tryTimeout: delete promise_timeouts", "id", in.ID, "err", delErr)
 		}
 		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
 		if in.Target != "" {
@@ -731,7 +723,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
 					h.BucketFor(*in.TaskTRetry), h.shardFor(in.ID), *in.TaskTRetry, in.Origin, in.ID,
 				).Exec(); delErr != nil {
-					log.Printf("tryTimeout: delete retry timeout(%s): %v", in.ID, delErr)
+					slog.Warn("tryTimeout: delete retry timeout", "id", in.ID, "err", delErr)
 				}
 				yield(LabelPromiseTimeoutCleanupTaskTimeoutsRetry)
 			}
@@ -740,7 +732,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
 					h.BucketFor(*in.TaskTLease), h.shardFor(in.ID), *in.TaskTLease, in.Origin, in.ID,
 				).Exec(); delErr != nil {
-					log.Printf("tryTimeout: delete lease timeout(%s): %v", in.ID, delErr)
+					slog.Warn("tryTimeout: delete lease timeout", "id", in.ID, "err", delErr)
 				}
 				yield(LabelPromiseTimeoutCleanupTaskTimeoutsLease)
 			}
@@ -769,7 +761,7 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
 				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
 			).Exec(); delErr != nil {
-				log.Printf("onTaskRetryTimeout: delete old timeout(%s): %v", id, delErr)
+				slog.Warn("onTaskRetryTimeout: delete old timeout", "id", id, "err", delErr)
 			}
 			yield(LabelTaskRetryTimeoutCleanupTaskTimeoutsRetry)
 		}
@@ -842,7 +834,7 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
 			h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("onTaskRetryTimeout: rollback new timeout(%s): %v", id, delErr)
+			slog.Error("onTaskRetryTimeout: rollback new timeout", "id", id, "err", delErr)
 		}
 		yield(LabelTaskRetryTimeoutRollbackTaskTimeoutsRetry)
 		return nil
@@ -871,7 +863,7 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
 				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
 			).Exec(); delErr != nil {
-				log.Printf("onTaskLeaseTimeout: delete lease timeout(%s): %v", id, delErr)
+				slog.Warn("onTaskLeaseTimeout: delete lease timeout", "id", id, "err", delErr)
 			}
 			yield(LabelTaskLeaseTimeoutCleanupTaskTimeoutsLease)
 		}
@@ -936,7 +928,7 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
 			h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
 		).Exec(); delErr != nil {
-			log.Printf("onTaskLeaseTimeout: rollback retry timeout(%s): %v", id, delErr)
+			slog.Error("onTaskLeaseTimeout: rollback retry timeout", "id", id, "err", delErr)
 		}
 		yield(LabelTaskLeaseTimeoutRollbackTaskTimeoutsRetry)
 		return nil

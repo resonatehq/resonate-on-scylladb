@@ -3,7 +3,7 @@ package loop
 import (
 	"bytes"
 	"context"
-	"log"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -94,8 +94,7 @@ func (p *TimeoutProcessor) coordinator() {
 
 		// 3. Rebalance if the shard set changed.
 		if !slices.Equal(currentShards, newShards) {
-			log.Printf("timeout coordinator %s: shard rebalance %v → %v (workers: %d)",
-				p.workerID, currentShards, newShards, len(allWorkers))
+			slog.Info("timeout coordinator: shard rebalance", "worker_id", p.workerID, "from", currentShards, "to", newShards, "workers", len(allWorkers))
 			cancel()
 			wg.Wait()
 

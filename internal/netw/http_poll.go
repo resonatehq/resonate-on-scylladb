@@ -1,7 +1,7 @@
 package netw
 
 import (
-	"log"
+	"log/slog"
 	"math/rand/v2"
 	"net/url"
 	"sync"
@@ -118,13 +118,13 @@ func (h *HttpPoll) Deregister(group string, connID uint64) {
 func (h *HttpPoll) Send(address string, payload []byte) {
 	addr, ok := parsePollAddress(address)
 	if !ok {
-		log.Printf("HttpPoll: invalid address %q", address)
+		slog.Warn("HttpPoll: invalid address", "address", address)
 		return
 	}
 
 	target := h.pick(addr)
 	if target == nil {
-		log.Printf("HttpPoll: no matching connection for %q, message dropped", address)
+		slog.Warn("HttpPoll: no matching connection, message dropped", "address", address)
 		return
 	}
 
@@ -135,8 +135,7 @@ func (h *HttpPoll) Send(address string, payload []byte) {
 	select {
 	case target.tx <- payload:
 	default:
-		log.Printf("HttpPoll: buffer full for group=%q id=%q, message dropped",
-			addr.Group, target.id)
+		slog.Warn("HttpPoll: buffer full, message dropped", "group", addr.Group, "id", target.id)
 	}
 }
 

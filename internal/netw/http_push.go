@@ -2,7 +2,7 @@ package netw
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -19,12 +19,12 @@ func (h *HttpPush) Send(address string, payload []byte) {
 	go func() {
 		resp, err := h.client.Post(address, "application/json", bytes.NewReader(payload))
 		if err != nil {
-			log.Printf("HttpPush: POST %s: %v", address, err)
+			slog.Warn("HttpPush: POST error", "address", address, "err", err)
 			return
 		}
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
-			log.Printf("HttpPush: POST %s: status %d", address, resp.StatusCode)
+			slog.Warn("HttpPush: POST non-2xx status", "address", address, "status", resp.StatusCode)
 		}
 	}()
 }
