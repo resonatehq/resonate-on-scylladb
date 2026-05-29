@@ -16,7 +16,7 @@ services:
       target: server
     command: ["serve", "--debug"]
     environment:
-      - SCYLLADB_HOST=scylladb
+      - SCYLLADB_HOSTS=scylladb
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8001/ -H 'Content-Type: application/json' -d '{\"kind\":\"debug.start\",\"head\":{},\"data\":{}}' || exit 1"]
       interval: 2s
