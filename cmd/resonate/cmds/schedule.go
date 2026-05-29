@@ -9,14 +9,15 @@ import (
 
 func ScheduleCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "schedule",
-		Short: "Manage schedules",
+		Use:     "schedules",
+		Aliases: []string{"schedule"},
+		Short:   "Manage schedules",
 	}
+	cmd.PersistentFlags().StringVar(&origin, "origin", "", "Request origin")
 	cmd.AddCommand(
 		scheduleGetCmd(),
 		scheduleCreateCmd(),
 		scheduleDeleteCmd(),
-		scheduleSearchCmd(),
 	)
 	return cmd
 }
@@ -78,30 +79,4 @@ func scheduleDeleteCmd() *cobra.Command {
 			return send("schedule.delete", core.ScheduleDeleteData{ID: args[0]})
 		},
 	}
-}
-
-func scheduleSearchCmd() *cobra.Command {
-	var (
-		tags   map[string]string
-		limit  int
-		cursor string
-	)
-	cmd := &cobra.Command{
-		Use:   "search",
-		Short: "Search schedules",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			data := core.ScheduleSearchData{
-				Tags:   tags,
-				Cursor: cursor,
-			}
-			if cmd.Flags().Changed("limit") {
-				data.Limit = &limit
-			}
-			return send("schedule.search", data)
-		},
-	}
-	cmd.Flags().StringToStringVar(&tags, "tag", map[string]string{}, "filter by tag (key=value)")
-	cmd.Flags().IntVar(&limit, "limit", 0, "max results")
-	cmd.Flags().StringVar(&cursor, "cursor", "", "pagination cursor")
-	return cmd
 }

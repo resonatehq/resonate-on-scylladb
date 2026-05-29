@@ -42,6 +42,9 @@ func init() {
 
 func setupHandler(t *testing.T) *core.Handler {
 	t.Helper()
+	if !testFlagChanged("scylladb-host") && os.Getenv("SCYLLADB_HOST") == "" && os.Getenv("SCYLLADB_HOSTS") == "" {
+		t.Skip("skipping: no ScyllaDB host configured (set SCYLLADB_HOST or pass -scylladb-host)")
+	}
 	cfg := dbms.Config{
 		Hosts:        testHosts(),
 		Port:         testPort(),

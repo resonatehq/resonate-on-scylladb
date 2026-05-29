@@ -9,14 +9,14 @@ import (
 
 func PromiseCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "promise",
-		Short: "Manage promises",
+		Use:     "promises",
+		Aliases: []string{"promise"},
+		Short:   "Manage promises",
 	}
+	cmd.PersistentFlags().StringVar(&origin, "origin", "", "Request origin")
 	cmd.AddCommand(
 		promiseGetCmd(),
 		promiseCreateCmd(),
-		promiseSettleCmd(),
-		promiseSearchCmd(),
 		promiseRegisterCallbackCmd(),
 		promiseRegisterListenerCmd(),
 	)
@@ -60,60 +60,6 @@ func promiseCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&paramData, "param-data", "", "param data")
 	cmd.Flags().StringToStringVar(&paramHeaders, "param-header", map[string]string{}, "param header (key=value)")
 	cmd.Flags().StringToStringVar(&tags, "tag", map[string]string{}, "tag (key=value)")
-	return cmd
-}
-
-func promiseSettleCmd() *cobra.Command {
-	var (
-		state        string
-		valueData    string
-		valueHeaders map[string]string
-	)
-	cmd := &cobra.Command{
-		Use:   "settle <id>",
-		Short: "Settle a promise",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			return send("promise.settle", core.PromiseSettleData{
-				ID:    args[0],
-				State: state,
-				Value: &core.Value{Headers: valueHeaders, Data: valueData},
-			})
-		},
-	}
-	cmd.Flags().StringVar(&state, "state", "", "resolved | rejected | rejected_canceled")
-	cmd.Flags().StringVar(&valueData, "value-data", "", "value data")
-	cmd.Flags().StringToStringVar(&valueHeaders, "value-header", map[string]string{}, "value header (key=value)")
-	_ = cmd.MarkFlagRequired("state")
-	return cmd
-}
-
-func promiseSearchCmd() *cobra.Command {
-	var (
-		state  string
-		tags   map[string]string
-		limit  int
-		cursor string
-	)
-	cmd := &cobra.Command{
-		Use:   "search",
-		Short: "Search promises",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			data := core.PromiseSearchData{
-				State:  state,
-				Tags:   tags,
-				Cursor: cursor,
-			}
-			if cmd.Flags().Changed("limit") {
-				data.Limit = &limit
-			}
-			return send("promise.search", data)
-		},
-	}
-	cmd.Flags().StringVar(&state, "state", "", "filter by state")
-	cmd.Flags().StringToStringVar(&tags, "tag", map[string]string{}, "filter by tag (key=value)")
-	cmd.Flags().IntVar(&limit, "limit", 0, "max results")
-	cmd.Flags().StringVar(&cursor, "cursor", "", "pagination cursor")
 	return cmd
 }
 
