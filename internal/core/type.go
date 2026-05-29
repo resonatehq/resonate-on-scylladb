@@ -191,13 +191,6 @@ type PromiseRegisterListenerData struct {
 	Address string `json:"address"`
 }
 
-type PromiseSearchData struct {
-	State  string            `json:"state,omitempty"`
-	Tags   map[string]string `json:"tags,omitempty"`
-	Limit  *int              `json:"limit,omitempty"`
-	Cursor string            `json:"cursor,omitempty"`
-}
-
 // =============================================================================
 // REQUEST DATA TYPES — TASK
 // =============================================================================
@@ -286,12 +279,6 @@ type ScheduleDeleteData struct {
 	ID string `json:"id"`
 }
 
-type ScheduleSearchData struct {
-	Tags   map[string]string `json:"tags,omitempty"`
-	Limit  *int              `json:"limit,omitempty"`
-	Cursor string            `json:"cursor,omitempty"`
-}
-
 // =============================================================================
 // REQUEST DATA TYPES — DEBUG
 // =============================================================================
@@ -324,11 +311,6 @@ type PromiseRegisterCallbackResData struct {
 
 type PromiseRegisterListenerResData struct {
 	Promise PromiseRecord `json:"promise"`
-}
-
-type PromiseSearchResData struct {
-	Promises []PromiseRecord `json:"promises"`
-	Cursor   string          `json:"cursor,omitempty"`
 }
 
 // =============================================================================
@@ -387,11 +369,6 @@ type ScheduleGetResData struct {
 
 type ScheduleCreateResData struct {
 	Schedule ScheduleRecord `json:"schedule"`
-}
-
-type ScheduleSearchResData struct {
-	Schedules []ScheduleRecord `json:"schedules"`
-	Cursor    string           `json:"cursor,omitempty"`
 }
 
 // ScheduleDeleteResData has no fields.

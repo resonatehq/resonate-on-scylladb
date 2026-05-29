@@ -29,6 +29,7 @@ func init() {
 		cmds.ServeCmd(),
 		cmds.PromiseCmd(),
 		cmds.ScheduleCmd(),
+		cmds.TaskCmd(),
 		cmds.InvokeCmd(),
 	)
 }

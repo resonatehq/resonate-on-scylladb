@@ -32,6 +32,9 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: go test
+        run: go test ./...
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Diff — TestHandlerDiff. Sequential, no concurrency, no failures.
   # 100 iter × 200 steps. Compares oracle vs handler at every step on response

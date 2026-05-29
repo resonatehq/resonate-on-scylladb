@@ -11,6 +11,7 @@ import (
 )
 
 var serverAddr string
+var origin string
 
 func SetServerAddr(addr string) {
 	serverAddr = addr
@@ -19,9 +20,13 @@ func SetServerAddr(addr string) {
 func send(kind string, data any) error {
 	corrID := fmt.Sprintf("%016x", rand.Uint64())
 
+	head := map[string]any{"corrId": corrID}
+	if origin != "" {
+		head["resonate:origin"] = origin
+	}
 	req := map[string]any{
 		"kind": kind,
-		"head": map[string]any{"corrId": corrID},
+		"head": head,
 		"data": data,
 	}
 

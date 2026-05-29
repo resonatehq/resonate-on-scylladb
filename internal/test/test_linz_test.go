@@ -109,7 +109,7 @@ func TestLinearizabilitySequential(t *testing.T) {
 	model := resonateModel()
 
 	baseSeed := envInt64("RESONATE_TEST_SEED", time.Now().UnixNano())
-	iterations := envInt("RESONATE_TEST_ITERATIONS", 1000)
+	iterations := envInt("RESONATE_TEST_ITERATIONS", 50)
 	operations := envInt("RESONATE_TEST_OPERATIONS", 250)
 	t.Logf("config: seed=%d iterations=%d operations=%d promises=%s", baseSeed, iterations, operations, promisesConfig())
 

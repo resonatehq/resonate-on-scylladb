@@ -185,13 +185,6 @@ func (h *Handler) Handle(raw []byte, yield func(string)) ([]byte, error) {
 		}
 		res = h.PromiseRegisterListener(env.Head, req, now, yield)
 
-	case "promise.search":
-		var req PromiseSearchData
-		if err := decode(&req); err != nil {
-			return errRes(env.Kind, env.Head.CorrID, env.Head.Version, 400, fmt.Sprintf("decode %s: %s", env.Kind, err)), nil
-		}
-		res = notImplemented()
-
 	// --- Task ---
 
 	case "task.create":
@@ -332,13 +325,6 @@ func (h *Handler) Handle(raw []byte, yield func(string)) ([]byte, error) {
 			return errRes(env.Kind, env.Head.CorrID, env.Head.Version, 400, err.Error()), nil
 		}
 		res = h.ScheduleDelete(env.Head, req, now, yield)
-
-	case "schedule.search":
-		var req ScheduleSearchData
-		if err := decode(&req); err != nil {
-			return errRes(env.Kind, env.Head.CorrID, env.Head.Version, 400, fmt.Sprintf("decode %s: %s", env.Kind, err)), nil
-		}
-		res = notImplemented()
 
 	default:
 		return errRes(env.Kind, env.Head.CorrID, env.Head.Version, 400, fmt.Sprintf("unknown kind: %s", env.Kind)), nil
