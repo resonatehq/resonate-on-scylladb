@@ -875,12 +875,26 @@ func (h *Handler) TaskFence(head RequestHead, req TaskFenceData, now int64, yiel
 		}
 	}
 
-	// 5. Dispatch inner action.
+	// 5. Validate and dispatch inner action.
 	var actionResult any
 	switch {
 	case createData != nil:
+		if err := createData.Validate(); err != nil {
+			return Res[string]{
+				Kind: "task.fence",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
+				Data: "Invalid promise.create data: " + err.Error(),
+			}
+		}
 		actionResult = h.PromiseCreate(innerEnv.Head, *createData, now, yield)
 	case settleData != nil:
+		if err := settleData.Validate(); err != nil {
+			return Res[string]{
+				Kind: "task.fence",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
+				Data: "Invalid promise.settle data: " + err.Error(),
+			}
+		}
 		actionResult = h.PromiseSettle(innerEnv.Head, *settleData, now, yield)
 	}
 
