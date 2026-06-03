@@ -20,7 +20,7 @@ func SetServerAddr(addr string) {
 func send(kind string, data any) error {
 	corrID := fmt.Sprintf("%016x", rand.Uint64())
 
-	head := map[string]any{"corrId": corrID}
+	head := map[string]any{"corrId": corrID, "version": "2026-04-01"}
 	if origin != "" {
 		head["resonate:origin"] = origin
 	}
