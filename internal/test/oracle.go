@@ -1533,6 +1533,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 			tags["resonate:origin"] = promiseID
 			tags["resonate:branch"] = promiseID
 			tags["resonate:parent"] = promiseID
+			tags["resonate:prefix"] = promiseID
 
 			timeoutAt := currentTimeout + sc.PromiseTimeout
 			if s.getPromise(promiseID, promiseID) == nil && now >= timeoutAt {
