@@ -461,6 +461,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	tags["resonate:origin"] = promiseID
 	tags["resonate:branch"] = promiseID
 	tags["resonate:parent"] = promiseID
+	tags["resonate:prefix"] = promiseID
 
 	target := tags["resonate:target"]
 	timeoutAt := fireTime + s.PromiseTimeout
