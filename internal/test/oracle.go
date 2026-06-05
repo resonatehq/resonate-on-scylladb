@@ -753,7 +753,7 @@ func (s *Server) promiseCreate(now int64, origin, id string, timeoutAt int64, pa
 			s.setTTimeout(TTimeout{origin, id, 0, delay})
 		} else {
 			s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-			s.sendExecute(addr, id, 0)
+			s.sendExecute(origin, addr, id, 0)
 		}
 	}
 	return s.respond("promise.create", 200, map[string]any{"promise": s.toPromiseRecord(p)})
@@ -804,7 +804,7 @@ func (s *Server) promiseRegisterCallback(now int64, awaitedOrigin, awaited, awai
 				t.State = "pending"
 				t.Resumes = map[string]struct{}{awaited: {}}
 				s.setTTimeout(TTimeout{awaiterOrigin, awaiter, 0, now + pendingRetryTTL})
-				s.sendExecute(awaiterP.Tags["resonate:target"], awaiter, t.Version)
+				s.sendExecute(awaiterOrigin, awaiterP.Tags["resonate:target"], awaiter, t.Version)
 			case "pending", "acquired", "halted":
 				t.Resumes[awaited] = struct{}{}
 			}
@@ -982,7 +982,7 @@ func (s *Server) taskRelease(now int64, origin, id string, version int) ([]byte,
 	t.PID = ""
 	t.TTL = nil
 	s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-	s.sendExecute(p.Tags["resonate:target"], id, t.Version)
+	s.sendExecute(origin, p.Tags["resonate:target"], id, t.Version)
 	return s.respond("task.release", 200, struct{}{})
 }
 
@@ -1112,7 +1112,7 @@ func (s *Server) taskContinue(now int64, origin, id string) ([]byte, error) {
 	}
 	t.State = "pending"
 	s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-	s.sendExecute(p.Tags["resonate:target"], id, t.Version)
+	s.sendExecute(origin, p.Tags["resonate:target"], id, t.Version)
 	return s.respond("task.continue", 200, struct{}{})
 }
 
@@ -1482,7 +1482,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		t.TTL = nil
 		s.setTTimeout(TTimeout{r.origin, r.id, 0, now + pendingRetryTTL})
 		p := s.getPromise(r.origin, r.id)
-		s.sendExecute(p.Tags["resonate:target"], r.id, t.Version)
+		s.sendExecute(r.origin, p.Tags["resonate:target"], r.id, t.Version)
 	}
 
 	// Task retries
@@ -1493,7 +1493,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		}
 		s.setTTimeout(TTimeout{r.origin, r.id, 0, now + pendingRetryTTL})
 		p := s.getPromise(r.origin, r.id)
-		s.sendExecute(p.Tags["resonate:target"], r.id, t.Version)
+		s.sendExecute(r.origin, p.Tags["resonate:target"], r.id, t.Version)
 	}
 
 	// Schedule timeouts — sort by (timeout, id) for determinism
@@ -1630,7 +1630,7 @@ func (s *Server) triggerCallbacks(origin, promiseID string, now int64) {
 			t.State = "pending"
 			t.Resumes = map[string]struct{}{promiseID: {}}
 			s.setTTimeout(TTimeout{awaiterOrigin, awaiterID, 0, now + pendingRetryTTL})
-			s.sendExecute(awaiterP.Tags["resonate:target"], awaiterID, t.Version)
+			s.sendExecute(awaiterOrigin, awaiterP.Tags["resonate:target"], awaiterID, t.Version)
 		case "pending", "acquired", "halted":
 			t.Resumes[promiseID] = struct{}{}
 		}
@@ -1659,7 +1659,7 @@ func (s *Server) triggerListeners(origin, promiseID string) {
 	p.Listeners = make(map[string]struct{})
 }
 
-func (s *Server) sendExecute(address, taskID string, version int) {
+func (s *Server) sendExecute(origin, address, taskID string, version int) {
 	msg, _ := json.Marshal(struct {
 		Kind string   `json:"kind"`
 		Head struct{} `json:"head"`
@@ -1668,16 +1668,18 @@ func (s *Server) sendExecute(address, taskID string, version int) {
 				ID      string `json:"id"`
 				Version int    `json:"version"`
 			} `json:"task"`
+			Origin string `json:"origin"`
 		} `json:"data"`
 	}{Kind: "execute", Data: struct {
 		Task struct {
 			ID      string `json:"id"`
 			Version int    `json:"version"`
 		} `json:"task"`
+		Origin string `json:"origin"`
 	}{Task: struct {
 		ID      string `json:"id"`
 		Version int    `json:"version"`
-	}{ID: taskID, Version: version}}})
+	}{ID: taskID, Version: version}, Origin: origin}})
 
 	for i, m := range s.outgoing {
 		var k struct {

@@ -67,7 +67,8 @@ type ExecuteMsg struct {
 	Kind string      `json:"kind"` // "execute"
 	Head MessageHead `json:"head"`
 	Data struct {
-		Task TaskRef `json:"task"`
+		Task   TaskRef `json:"task"`
+		Origin string  `json:"origin"`
 	} `json:"data"`
 }
 
