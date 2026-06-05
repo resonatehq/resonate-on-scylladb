@@ -635,7 +635,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 
 	// INSERT applied: send execute to the target if set.
 	if target != "" {
-		h.sendExecute(target, promiseID, 0)
+		h.sendExecute(promiseID, target, promiseID, 0)
 	}
 	return true
 }

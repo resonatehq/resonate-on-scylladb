@@ -705,7 +705,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 	}
 
 	for _, a := range awaiters {
-		h.sendExecute(a.target, a.id, a.taskVersion)
+		h.sendExecute(in.Origin, a.target, a.id, a.taskVersion)
 	}
 	if awaiters != nil {
 		h.sendUnblock(in.Listeners, unblockRec)
@@ -840,7 +840,7 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 		return nil
 	}
 
-	h.sendExecute(target, id, taskVersion)
+	h.sendExecute(origin, target, id, taskVersion)
 	return nil
 }
 
@@ -935,7 +935,7 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 	}
 
 	// Lease entry cleaned up by defer. Retry timeout was pre-inserted above.
-	h.sendExecute(target, id, taskVersion)
+	h.sendExecute(origin, target, id, taskVersion)
 	return nil
 }
 
@@ -967,15 +967,16 @@ func (h *Handler) sendUnblock(listeners []string, rec PromiseRecord) {
 // sendExecute dispatches an execute message for the given task. The Recorder
 // (when installed via the debug Dispatcher) coalesces duplicate executes for
 // the same task_id at snap time.
-func (h *Handler) sendExecute(target, taskID string, version int) {
+func (h *Handler) sendExecute(origin, target, taskID string, version int) {
 	if target == "" {
 		return
 	}
 	msg := ExecuteMsg{
 		Kind: "execute",
 		Data: struct {
-			Task TaskRef `json:"task"`
-		}{Task: TaskRef{ID: taskID, Version: version}},
+			Task   TaskRef `json:"task"`
+			Origin string  `json:"origin"`
+		}{Task: TaskRef{ID: taskID, Version: version}, Origin: origin},
 	}
 	b, err := json.Marshal(msg)
 	if err != nil {
