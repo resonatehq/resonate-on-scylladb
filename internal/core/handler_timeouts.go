@@ -17,6 +17,7 @@ type resumeAwaiter struct {
 	target      string
 	id          string
 	taskVersion int
+	origin      string
 }
 
 // settledData carries the settled state returned from enqueueResume and tryTimeout.
@@ -651,6 +652,7 @@ func (h *Handler) enqueueResume(
 				target:      a.target,
 				id:          a.id,
 				taskVersion: a.taskVersion,
+				origin:      origin,
 			})
 		}
 	}
@@ -741,7 +743,7 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 		}
 
 		for _, a := range awaiters {
-			h.sendExecute(a.target, a.id, a.taskVersion)
+			h.sendExecute(a.target, a.id, a.taskVersion, a.origin)
 		}
 		if awaiters != nil {
 			h.sendUnblock(in.Listeners, unblockRec)
@@ -877,7 +879,7 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 		return nil
 	}
 
-	h.sendExecute(target, id, taskVersion)
+	h.sendExecute(target, id, taskVersion, origin)
 	return nil
 }
 
@@ -972,7 +974,7 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 	}
 
 	// Lease entry cleaned up by defer. Retry timeout was pre-inserted above.
-	h.sendExecute(target, id, taskVersion)
+	h.sendExecute(target, id, taskVersion, origin)
 	return nil
 }
 
@@ -1004,16 +1006,14 @@ func (h *Handler) sendUnblock(listeners []string, rec PromiseRecord) {
 // sendExecute dispatches an execute message for the given task. The Recorder
 // (when installed via the debug Dispatcher) coalesces duplicate executes for
 // the same task_id at snap time.
-func (h *Handler) sendExecute(target, taskID string, version int) {
+func (h *Handler) sendExecute(target, taskID string, version int, origin string) {
 	if target == "" {
 		return
 	}
-	msg := ExecuteMsg{
-		Kind: "execute",
-		Data: struct {
-			Task TaskRef `json:"task"`
-		}{Task: TaskRef{ID: taskID, Version: version}},
-	}
+	var msg ExecuteMsg
+	msg.Kind = "execute"
+	msg.Data.Task = TaskRef{ID: taskID, Version: version}
+	msg.Data.RootPromiseId = origin
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return

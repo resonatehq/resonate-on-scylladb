@@ -742,7 +742,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 	}
 
 	// Send execute message so another worker can pick up the task.
-	h.sendExecute(row.Target, id, *req.Version)
+	h.sendExecute(row.Target, id, *req.Version, origin)
 
 	return Res[struct{}]{
 		Kind: "task.release",
@@ -1443,7 +1443,7 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 		}
 
 		for _, a := range awaiters {
-			h.sendExecute(a.target, a.id, a.taskVersion)
+			h.sendExecute(a.target, a.id, a.taskVersion, a.origin)
 		}
 		h.sendUnblock(row.Listeners, unblockRec)
 
@@ -1715,7 +1715,7 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 	}
 
 	// 3. Auxiliary: send execute message. Retry timeout was pre-inserted above.
-	h.sendExecute(row.Target, id, row.Task.Version)
+	h.sendExecute(row.Target, id, row.Task.Version, origin)
 
 	return Res[struct{}]{
 		Kind: "task.continue",

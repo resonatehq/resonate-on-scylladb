@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gocql/gocql"
 )
@@ -17,22 +18,51 @@ import (
 
 func (h *Handler) PromiseGet(head RequestHead, req PromiseGetData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
 
-	row, err := h.readAndTryTimeout(id, origin, now, yield)
+	// Resolve the partition origin to read from. With an explicit head origin we
+	// trust it outright — this is what every internal caller and the diff/oracle
+	// harness supply, so their behaviour is unchanged. Without one (a bare
+	// get-by-id, as a generic client issues for a child promise it only knows by
+	// id) we resolve the lineage: a root promise always lives in its own
+	// partition, and a child id is formed as <parent>.<n>, so the lineage root is
+	// reachable by stripping trailing ".<seg>" components. We try id first (roots,
+	// including ids that themselves contain dots), then progressively shorter
+	// prefixes until the row is found.
+	origins := []string{id}
+	if head.Origin != "" {
+		origins = []string{head.Origin}
+	} else {
+		for p := id; ; {
+			i := strings.LastIndexByte(p, '.')
+			if i < 0 {
+				break
+			}
+			p = p[:i]
+			origins = append(origins, p)
+		}
+	}
+
+	var row *promiseRow
+	var err error
+	for _, origin := range origins {
+		row, err = h.readAndTryTimeout(id, origin, now, yield)
+		if err == nil {
+			break
+		}
+		if err != gocql.ErrNotFound {
+			slog.Error("promise.get read", "id", id, "err", err)
+			return Res[string]{
+				Kind: "promise.get",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+				Data: err.Error(),
+			}
+		}
+	}
 	if err == gocql.ErrNotFound {
 		return Res[string]{
 			Kind: "promise.get",
 			Head: ResponseHead{CorrID: head.CorrID, Status: 404, Version: head.Version},
 			Data: "Promise not found",
-		}
-	}
-	if err != nil {
-		slog.Error("promise.get read", "id", id, "err", err)
-		return Res[string]{
-			Kind: "promise.get",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-			Data: err.Error(),
 		}
 	}
 
@@ -510,7 +540,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	if state == "pending" && hasTask && taskRetryImmediate {
 		// Immediately dispatch execute so a worker can pick up the task without
 		// waiting for the retry timeout to fire.
-		h.sendExecute(target, id, 0)
+		h.sendExecute(target, id, 0, origin)
 	}
 
 	return Res[PromiseCreateResData]{
@@ -880,7 +910,7 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 		if awaiters != nil {
 			// This call won the settle. The snapshot is CAS-validated.
 			for _, a := range awaiters {
-				h.sendExecute(a.target, a.id, a.taskVersion)
+				h.sendExecute(a.target, a.id, a.taskVersion, a.origin)
 			}
 			h.sendUnblock(row.Listeners, unblockRec)
 
@@ -984,7 +1014,7 @@ func (h *Handler) resumeCallbackAwaiter(
 			yield(LabelPromiseRegisterCallbackResumeRollback)
 			return fmt.Errorf("concurrent modification")
 		}
-		h.sendExecute(target, awaiterID, taskVersion)
+		h.sendExecute(target, awaiterID, taskVersion, origin)
 
 	case "pending", "acquired", "halted":
 		lwtRow := make(map[string]interface{})

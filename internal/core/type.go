@@ -68,6 +68,11 @@ type ExecuteMsg struct {
 	Head MessageHead `json:"head"`
 	Data struct {
 		Task TaskRef `json:"task"`
+		// RootPromiseId is the partition origin of the task's promise (the
+		// lineage root). The worker must echo it back as resonate:origin on
+		// task.acquire so the server can locate the row, which is keyed by
+		// (origin, id). Without it a child task (origin != id) is unfindable.
+		RootPromiseId string `json:"rootPromiseId"`
 	} `json:"data"`
 }
 
