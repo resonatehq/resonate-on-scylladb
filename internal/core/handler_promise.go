@@ -509,7 +509,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	if state == "pending" && hasTask && taskRetryImmediate {
 		// Immediately dispatch execute so a worker can pick up the task without
 		// waiting for the retry timeout to fire.
-		h.sendExecute(target, id, 0)
+		h.sendExecute(origin, target, id, 0)
 	}
 
 	return Res[PromiseCreateResData]{
@@ -834,7 +834,7 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 	if awaiters != nil {
 		// This call won the settle.
 		for _, a := range awaiters {
-			h.sendExecute(a.target, a.id, a.taskVersion)
+			h.sendExecute(origin, a.target, a.id, a.taskVersion)
 		}
 		h.sendUnblock(row.Listeners, unblockRec)
 
@@ -937,7 +937,7 @@ func (h *Handler) resumeCallbackAwaiter(
 			yield(LabelPromiseRegisterCallbackResumeRollback)
 			return fmt.Errorf("concurrent modification")
 		}
-		h.sendExecute(target, awaiterID, taskVersion)
+		h.sendExecute(origin, target, awaiterID, taskVersion)
 
 	case "pending", "acquired", "halted":
 		lwtRow := make(map[string]interface{})
