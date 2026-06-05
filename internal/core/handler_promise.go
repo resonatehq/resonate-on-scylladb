@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -774,111 +775,157 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 	}
 
 	// 3. Promise is pending and not expired; proceed with explicit settle.
+	//
+	// The settle CAS conditions on both callbacks AND listeners, so a concurrent
+	// register_listener/register_callback fails the CAS (errConcurrentSettle)
+	// instead of being silently wiped by `listeners = {}`. We re-read and retry,
+	// bounded by maxSettleRetries, so the listener set we notify (sendUnblock) is
+	// the one the winning CAS validated. settleState/value and settledAtVal
+	// depend only on the request and the immutable CreatedAt, so they are stable
+	// across re-reads.
 	settleState := req.State
+	settleValueHeaders := req.Value.Headers
+	settleValueData := req.Value.Data
 	settledAtVal := now
 	if settledAtVal < row.Promise.CreatedAt {
 		settledAtVal = row.Promise.CreatedAt
 	}
-	settleValueHeaders := req.Value.Headers
-	settleValueData := req.Value.Data
 
-	// 4. Build settle statement (two variants: with task, without task).
-	var settleStmt string
-	var settleArgs []interface{}
-	if row.Target != "" {
-		settleStmt = `UPDATE promises SET
-		     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
-		     callbacks = {}, listeners = {},
-		     task_state = 'fulfilled', task_pid = null, task_ttl = null,
-		     task_timeout_retry = null, task_timeout_lease = null,
-		     task_resumes = {}
-		 WHERE origin = ? AND id = ?
-		 IF state = 'pending' AND callbacks = ?
-		 AND settled_at = null AND value_headers = null AND value_data = null`
-		settleArgs = []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, row.Callbacks}
-	} else {
-		settleStmt = `UPDATE promises SET
-		     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
-		     callbacks = {}, listeners = {}
-		 WHERE origin = ? AND id = ?
-		 IF state = 'pending' AND callbacks = ?
-		 AND settled_at = null AND value_headers = null AND value_data = null`
-		settleArgs = []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, row.Callbacks}
-	}
-
-	settledAtCopy := settledAtVal
-	unblockRec := PromiseRecord{
-		ID:        id,
-		State:     settleState,
-		Param:     row.Promise.Param,
-		Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
-		Tags:      row.Promise.Tags,
-		TimeoutAt: row.Promise.TimeoutAt,
-		CreatedAt: row.Promise.CreatedAt,
-		SettledAt: &settledAtCopy,
-	}
-
-	// 5. Call enqueueResume.
-	intended := settledData{State: settleState, ValHdrs: settleValueHeaders, ValData: settleValueData, SettledAt: settledAtVal}
-	awaiters, sd, enqErr := h.enqueueResume(id, origin, row.Callbacks, settledAtVal, settleStmt, settleArgs, intended, yield)
-
-	// 6. Handle result.
-	if enqErr != nil {
-		slog.Error("promise.settle enqueueResume", "id", id, "err", enqErr)
-		return Res[string]{
-			Kind: "promise.settle",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-			Data: enqErr.Error(),
-		}
-	}
-	if awaiters != nil {
-		// This call won the settle.
-		for _, a := range awaiters {
-			h.sendExecute(a.target, a.id, a.taskVersion)
-		}
-		h.sendUnblock(row.Listeners, unblockRec)
-
-		// 7. Cleanup (best-effort, only on success).
-		h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
-		).Exec()
-		yield(LabelPromiseSettleCleanupPromiseTimeouts)
+	for attempt := 0; ; attempt++ {
+		// 4. Build settle statement (two variants: with task, without task).
+		var settleStmt string
+		var settleArgs []interface{}
 		if row.Target != "" {
-			if row.TaskTRetry != nil {
-				h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, origin, id,
-				).Exec()
-				yield(LabelPromiseSettleCleanupTaskTimeoutsRetry)
+			settleStmt = `UPDATE promises SET
+			     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
+			     callbacks = {}, listeners = {},
+			     task_state = 'fulfilled', task_pid = null, task_ttl = null,
+			     task_timeout_retry = null, task_timeout_lease = null,
+			     task_resumes = {}
+			 WHERE origin = ? AND id = ?
+			 IF state = 'pending' AND callbacks = ? AND listeners = ?
+			 AND settled_at = null AND value_headers = null AND value_data = null`
+			settleArgs = []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, row.Callbacks, row.Listeners}
+		} else {
+			settleStmt = `UPDATE promises SET
+			     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
+			     callbacks = {}, listeners = {}
+			 WHERE origin = ? AND id = ?
+			 IF state = 'pending' AND callbacks = ? AND listeners = ?
+			 AND settled_at = null AND value_headers = null AND value_data = null`
+			settleArgs = []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, row.Callbacks, row.Listeners}
+		}
+
+		settledAtCopy := settledAtVal
+		unblockRec := PromiseRecord{
+			ID:        id,
+			State:     settleState,
+			Param:     row.Promise.Param,
+			Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
+			Tags:      row.Promise.Tags,
+			TimeoutAt: row.Promise.TimeoutAt,
+			CreatedAt: row.Promise.CreatedAt,
+			SettledAt: &settledAtCopy,
+		}
+
+		// 5. Call enqueueResume.
+		intended := settledData{State: settleState, ValHdrs: settleValueHeaders, ValData: settleValueData, SettledAt: settledAtVal}
+		awaiters, sd, enqErr := h.enqueueResume(id, origin, row.Callbacks, settledAtVal, settleStmt, settleArgs, intended, yield)
+
+		// 6. Handle result.
+		if errors.Is(enqErr, errConcurrentSettle) {
+			if attempt+1 >= maxSettleRetries {
+				slog.Error("promise.settle: retries exhausted", "id", id)
+				return Res[string]{
+					Kind: "promise.settle",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+					Data: "settle contended; please retry",
+				}
 			}
-			if row.TaskTLease != nil {
-				h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
-				).Exec()
-				yield(LabelPromiseSettleCleanupTaskTimeoutsLease)
+			// Re-read with the same `now` and retry. If a concurrent writer fully
+			// settled it in the meantime, return that state.
+			row, err = h.readAndTryTimeout(id, origin, now, yield)
+			if err == gocql.ErrNotFound {
+				return Res[string]{
+					Kind: "promise.settle",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 404, Version: head.Version},
+					Data: "Promise not found",
+				}
+			}
+			if err != nil {
+				slog.Error("promise.settle re-read", "id", id, "err", err)
+				return Res[string]{
+					Kind: "promise.settle",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+					Data: err.Error(),
+				}
+			}
+			if row.Promise.State != "pending" {
+				return Res[PromiseSettleResData]{
+					Kind: "promise.settle",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
+					Data: PromiseSettleResData{Promise: row.Promise},
+				}
+			}
+			continue
+		}
+		if enqErr != nil {
+			slog.Error("promise.settle enqueueResume", "id", id, "err", enqErr)
+			return Res[string]{
+				Kind: "promise.settle",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+				Data: enqErr.Error(),
 			}
 		}
-	}
+		if awaiters != nil {
+			// This call won the settle. The snapshot is CAS-validated.
+			for _, a := range awaiters {
+				h.sendExecute(a.target, a.id, a.taskVersion)
+			}
+			h.sendUnblock(row.Listeners, unblockRec)
 
-	// 8. Return settled promise (from sd, whether we won or a concurrent settle won).
-	settledAtFinal := sd.SettledAt
-	return Res[PromiseSettleResData]{
-		Kind: "promise.settle",
-		Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
-		Data: PromiseSettleResData{
-			Promise: PromiseRecord{
-				ID:        id,
-				State:     sd.State,
-				Param:     row.Promise.Param,
-				Value:     Value{Headers: sd.ValHdrs, Data: sd.ValData},
-				Tags:      row.Promise.Tags,
-				TimeoutAt: row.Promise.TimeoutAt,
-				CreatedAt: row.Promise.CreatedAt,
-				SettledAt: &settledAtFinal,
+			// 7. Cleanup (best-effort, only on success).
+			h.Session.Query(
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
+				h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
+			).Exec()
+			yield(LabelPromiseSettleCleanupPromiseTimeouts)
+			if row.Target != "" {
+				if row.TaskTRetry != nil {
+					h.Session.Query(
+						`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
+						h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, origin, id,
+					).Exec()
+					yield(LabelPromiseSettleCleanupTaskTimeoutsRetry)
+				}
+				if row.TaskTLease != nil {
+					h.Session.Query(
+						`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
+						h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+					).Exec()
+					yield(LabelPromiseSettleCleanupTaskTimeoutsLease)
+				}
+			}
+		}
+
+		// 8. Return settled promise (from sd, whether we won or a concurrent settle won).
+		settledAtFinal := sd.SettledAt
+		return Res[PromiseSettleResData]{
+			Kind: "promise.settle",
+			Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
+			Data: PromiseSettleResData{
+				Promise: PromiseRecord{
+					ID:        id,
+					State:     sd.State,
+					Param:     row.Promise.Param,
+					Value:     Value{Headers: sd.ValHdrs, Data: sd.ValData},
+					Tags:      row.Promise.Tags,
+					TimeoutAt: row.Promise.TimeoutAt,
+					CreatedAt: row.Promise.CreatedAt,
+					SettledAt: &settledAtFinal,
+				},
 			},
-		},
+		}
 	}
 }
 

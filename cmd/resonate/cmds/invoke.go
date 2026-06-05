@@ -52,7 +52,7 @@ func InvokeCmd() *cobra.Command {
 				return err
 			}
 
-			tags := map[string]string{"resonate:invoke": target}
+			tags := map[string]string{"resonate:target": target}
 			if delay > 0 {
 				tags["resonate:delay"] = fmt.Sprintf("%d", time.Now().Add(delay).UnixMilli())
 			}

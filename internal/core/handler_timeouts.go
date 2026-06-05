@@ -30,6 +30,18 @@ type settledData struct {
 // RetryTimeout is the delay between a task retry and the next execute message: 30 seconds in ms.
 const RetryTimeout = int64(30_000)
 
+// errConcurrentSettle is returned by enqueueResume when its settle CAS failed
+// while the promise was still pending — i.e. the callbacks or listeners set was
+// mutated concurrently between the caller's read and the CAS. Callers re-read
+// the promise row and retry, bounded by maxSettleRetries, so the snapshot they
+// notify (sendUnblock) is the set the winning CAS actually validated.
+var errConcurrentSettle = errors.New("concurrent modification; please retry")
+
+// maxSettleRetries bounds the optimistic settle/notify retry loop. A promise
+// settles exactly once, so contention is confined to the brief pre-settle
+// window; this is far more than enough to converge.
+const maxSettleRetries = 10
+
 // BucketFor returns the bucket identifier for timestamp t under the handler's
 // configured BucketWidth.
 func (h *Handler) BucketFor(t int64) int64 {
@@ -628,7 +640,7 @@ func (h *Handler) enqueueResume(
 			settledAtVal, _ := batchRow["settled_at"].(int64)
 			return nil, settledData{State: promState, ValHdrs: valHdrs, ValData: valData, SettledAt: settledAtVal}, nil
 		}
-		return nil, settledData{}, errors.New("concurrent modification; please retry")
+		return nil, settledData{}, errConcurrentSettle
 	}
 
 	// 7. On success: collect suspended awaiters for the caller to send execute messages.
@@ -661,31 +673,6 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 		newState = "resolved"
 	}
 
-	var settleStmt string
-	var settleArgs []interface{}
-	if in.Target != "" {
-		settleStmt = `UPDATE promises SET
-		     state = ?, settled_at = ?,
-		     value_headers = null, value_data = null,
-		     callbacks = {}, listeners = {},
-		     task_state = 'fulfilled', task_pid = null, task_ttl = null,
-		     task_timeout_retry = null, task_timeout_lease = null,
-		     task_resumes = {}
-		 WHERE origin = ? AND id = ?
-		 IF state = 'pending' AND callbacks = ?
-		 AND settled_at = null AND value_headers = null AND value_data = null`
-		settleArgs = []interface{}{newState, in.TimeoutAt, in.Origin, in.ID, in.Callbacks}
-	} else {
-		settleStmt = `UPDATE promises SET
-		     state = ?, settled_at = ?,
-		     value_headers = null, value_data = null,
-		     callbacks = {}, listeners = {}
-		 WHERE origin = ? AND id = ?
-		 IF state = 'pending' AND callbacks = ?
-		 AND settled_at = null AND value_headers = null AND value_data = null`
-		settleArgs = []interface{}{newState, in.TimeoutAt, in.Origin, in.ID, in.Callbacks}
-	}
-
 	settledAtCopy := in.TimeoutAt
 	unblockRec := PromiseRecord{
 		ID:        in.ID,
@@ -696,49 +683,99 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 		SettledAt: &settledAtCopy,
 	}
 
-	intended := settledData{State: newState, SettledAt: in.TimeoutAt}
-	awaiters, sd, err := h.enqueueResume(
-		in.ID, in.Origin, in.Callbacks, now,
-		settleStmt, settleArgs, intended, yield)
-	if err != nil {
-		return settledData{}, err
-	}
-
-	for _, a := range awaiters {
-		h.sendExecute(a.target, a.id, a.taskVersion)
-	}
-	if awaiters != nil {
-		h.sendUnblock(in.Listeners, unblockRec)
-		// Async cleanup on win.
-		if delErr := h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(in.TimeoutAt), h.shardFor(in.ID), in.TimeoutAt, in.Origin, in.ID,
-		).Exec(); delErr != nil {
-			slog.Warn("tryTimeout: delete promise_timeouts", "id", in.ID, "err", delErr)
-		}
-		yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
+	// The settle CAS conditions on both callbacks AND listeners, so a concurrent
+	// register_* fails the CAS (errConcurrentSettle) instead of being silently
+	// wiped. On retry we re-read those two sets so the listener set we notify is
+	// the one the winning CAS validated.
+	for attempt := 0; ; attempt++ {
+		var settleStmt string
+		var settleArgs []interface{}
 		if in.Target != "" {
-			if in.TaskTRetry != nil {
-				if delErr := h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*in.TaskTRetry), h.shardFor(in.ID), *in.TaskTRetry, in.Origin, in.ID,
-				).Exec(); delErr != nil {
-					slog.Warn("tryTimeout: delete retry timeout", "id", in.ID, "err", delErr)
-				}
-				yield(LabelPromiseTimeoutCleanupTaskTimeoutsRetry)
+			settleStmt = `UPDATE promises SET
+			     state = ?, settled_at = ?,
+			     value_headers = null, value_data = null,
+			     callbacks = {}, listeners = {},
+			     task_state = 'fulfilled', task_pid = null, task_ttl = null,
+			     task_timeout_retry = null, task_timeout_lease = null,
+			     task_resumes = {}
+			 WHERE origin = ? AND id = ?
+			 IF state = 'pending' AND callbacks = ? AND listeners = ?
+			 AND settled_at = null AND value_headers = null AND value_data = null`
+			settleArgs = []interface{}{newState, in.TimeoutAt, in.Origin, in.ID, in.Callbacks, in.Listeners}
+		} else {
+			settleStmt = `UPDATE promises SET
+			     state = ?, settled_at = ?,
+			     value_headers = null, value_data = null,
+			     callbacks = {}, listeners = {}
+			 WHERE origin = ? AND id = ?
+			 IF state = 'pending' AND callbacks = ? AND listeners = ?
+			 AND settled_at = null AND value_headers = null AND value_data = null`
+			settleArgs = []interface{}{newState, in.TimeoutAt, in.Origin, in.ID, in.Callbacks, in.Listeners}
+		}
+
+		intended := settledData{State: newState, SettledAt: in.TimeoutAt}
+		awaiters, sd, err := h.enqueueResume(
+			in.ID, in.Origin, in.Callbacks, now,
+			settleStmt, settleArgs, intended, yield)
+
+		if errors.Is(err, errConcurrentSettle) {
+			if attempt+1 >= maxSettleRetries {
+				return settledData{}, err
 			}
-			if in.TaskTLease != nil {
-				if delErr := h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*in.TaskTLease), h.shardFor(in.ID), *in.TaskTLease, in.Origin, in.ID,
-				).Exec(); delErr != nil {
-					slog.Warn("tryTimeout: delete lease timeout", "id", in.ID, "err", delErr)
+			// Re-read the contended sets and retry. If a concurrent writer fully
+			// settled it, the next CAS fails on state and enqueueResume returns
+			// that settled state (awaiters=nil).
+			var cbs, lns []string
+			if rerr := h.Session.Query(
+				`SELECT callbacks, listeners FROM promises WHERE origin = ? AND id = ?`,
+				in.Origin, in.ID,
+			).Scan(&cbs, &lns); rerr != nil {
+				return settledData{}, rerr
+			}
+			in.Callbacks = cbs
+			in.Listeners = lns
+			continue
+		}
+		if err != nil {
+			return settledData{}, err
+		}
+
+		for _, a := range awaiters {
+			h.sendExecute(a.target, a.id, a.taskVersion)
+		}
+		if awaiters != nil {
+			h.sendUnblock(in.Listeners, unblockRec)
+			// Async cleanup on win.
+			if delErr := h.Session.Query(
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
+				h.BucketFor(in.TimeoutAt), h.shardFor(in.ID), in.TimeoutAt, in.Origin, in.ID,
+			).Exec(); delErr != nil {
+				slog.Warn("tryTimeout: delete promise_timeouts", "id", in.ID, "err", delErr)
+			}
+			yield(LabelPromiseTimeoutCleanupPromiseTimeouts)
+			if in.Target != "" {
+				if in.TaskTRetry != nil {
+					if delErr := h.Session.Query(
+						`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
+						h.BucketFor(*in.TaskTRetry), h.shardFor(in.ID), *in.TaskTRetry, in.Origin, in.ID,
+					).Exec(); delErr != nil {
+						slog.Warn("tryTimeout: delete retry timeout", "id", in.ID, "err", delErr)
+					}
+					yield(LabelPromiseTimeoutCleanupTaskTimeoutsRetry)
 				}
-				yield(LabelPromiseTimeoutCleanupTaskTimeoutsLease)
+				if in.TaskTLease != nil {
+					if delErr := h.Session.Query(
+						`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
+						h.BucketFor(*in.TaskTLease), h.shardFor(in.ID), *in.TaskTLease, in.Origin, in.ID,
+					).Exec(); delErr != nil {
+						slog.Warn("tryTimeout: delete lease timeout", "id", in.ID, "err", delErr)
+					}
+					yield(LabelPromiseTimeoutCleanupTaskTimeoutsLease)
+				}
 			}
 		}
+		return sd, nil
 	}
-	return sd, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

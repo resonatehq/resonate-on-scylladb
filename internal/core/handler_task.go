@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 
 	"github.com/gocql/gocql"
@@ -1334,114 +1335,150 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 		}
 	}
 
-	// 2. State and version checks (helper applied timeout if expired).
-	if row.Promise.State != "pending" || row.Task.State != "acquired" {
-		return Res[string]{
-			Kind: "task.fulfill",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
-			Data: "Task not acquired",
-		}
-	}
-	if row.Task.Version != *req.Version {
-		return Res[string]{
-			Kind: "task.fulfill",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
-			Data: "Version mismatch",
-		}
-	}
-
-	// 4. Determine settle parameters from the inner action.
+	// 2-9. Settle with a bounded optimistic-retry loop. The settle CAS conditions
+	// on both callbacks AND listeners, so a register_listener/register_callback
+	// that commits concurrently fails the CAS instead of being silently wiped;
+	// on errConcurrentSettle we re-read and retry, so the listener set we notify
+	// (sendUnblock) is the one the winning CAS validated. settledAtVal depends
+	// only on the immutable CreatedAt and the fixed `now`, so it is stable across
+	// re-reads.
 	settleState := req.Action.Data.State
+	settleValueHeaders := req.Action.Data.Value.Headers
+	settleValueData := req.Action.Data.Value.Data
 	settledAtVal := now
 	if settledAtVal < row.Promise.CreatedAt {
 		settledAtVal = row.Promise.CreatedAt
 	}
-	settleValueHeaders := req.Action.Data.Value.Headers
-	settleValueData := req.Action.Data.Value.Data
 
-	// 5. Build settle statement. Add state='pending' to IF condition so that
-	// batchRow["state"] is populated on batch failure, allowing enqueueResume
-	// to distinguish concurrent-settle from concurrent-modify.
-	settleStmt := `UPDATE promises SET
-		     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
-		     callbacks = {}, listeners = {},
-		     task_state = 'fulfilled', task_pid = null, task_ttl = null,
-		     task_timeout_retry = null, task_timeout_lease = null,
-		     task_resumes = {}
-		 WHERE origin = ? AND id = ?
-		 IF state = 'pending' AND task_state = 'acquired' AND task_version = ? AND callbacks = ?
-		 AND settled_at = null AND value_headers = null AND value_data = null`
-	settleArgs := []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, *req.Version, row.Callbacks}
-
-	settledAtCopy := settledAtVal
-	unblockRec := PromiseRecord{
-		ID:        id,
-		State:     settleState,
-		Param:     row.Promise.Param,
-		Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
-		Tags:      row.Promise.Tags,
-		TimeoutAt: row.Promise.TimeoutAt,
-		CreatedAt: row.Promise.CreatedAt,
-		SettledAt: &settledAtCopy,
-	}
-
-	// 6. Call enqueueResume.
-	intended := settledData{State: settleState, ValHdrs: settleValueHeaders, ValData: settleValueData, SettledAt: settledAtVal}
-	awaiters, _, enqErr := h.enqueueResume(id, origin, row.Callbacks, settledAtVal, settleStmt, settleArgs, intended, yield)
-
-	// 7. Handle result.
-	if awaiters == nil && enqErr == nil {
-		// Promise already settled — task is no longer acquired.
-		return Res[string]{
-			Kind: "task.fulfill",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
-			Data: "Task not acquired",
+	for attempt := 0; ; attempt++ {
+		// State and version checks (helper applied timeout if expired). Re-checked
+		// every attempt against the freshly read row.
+		if row.Promise.State != "pending" || row.Task == nil || row.Task.State != "acquired" {
+			return Res[string]{
+				Kind: "task.fulfill",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
+				Data: "Task not acquired",
+			}
 		}
-	}
-	if enqErr != nil {
-		slog.Error("task.fulfill enqueueResume", "id", id, "err", enqErr)
-		return Res[string]{
-			Kind: "task.fulfill",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-			Data: enqErr.Error(),
+		if row.Task.Version != *req.Version {
+			return Res[string]{
+				Kind: "task.fulfill",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
+				Data: "Version mismatch",
+			}
 		}
-	}
-	for _, a := range awaiters {
-		h.sendExecute(a.target, a.id, a.taskVersion)
-	}
-	h.sendUnblock(row.Listeners, unblockRec)
 
-	// 8. Cleanup (best-effort, only on success).
-	h.Session.Query(
-		`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-		h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
-	).Exec()
-	yield(LabelTaskFulfillCleanupPromiseTimeouts)
-	if row.TaskTLease != nil {
+		// Build settle statement. state='pending' keeps batchRow["state"] populated
+		// on batch failure, letting enqueueResume distinguish concurrent-settle.
+		settleStmt := `UPDATE promises SET
+			     state = ?, value_headers = ?, value_data = ?, settled_at = ?,
+			     callbacks = {}, listeners = {},
+			     task_state = 'fulfilled', task_pid = null, task_ttl = null,
+			     task_timeout_retry = null, task_timeout_lease = null,
+			     task_resumes = {}
+			 WHERE origin = ? AND id = ?
+			 IF state = 'pending' AND task_state = 'acquired' AND task_version = ? AND callbacks = ? AND listeners = ?
+			 AND settled_at = null AND value_headers = null AND value_data = null`
+		settleArgs := []interface{}{settleState, settleValueHeaders, settleValueData, settledAtVal, origin, id, *req.Version, row.Callbacks, row.Listeners}
+
+		settledAtCopy := settledAtVal
+		unblockRec := PromiseRecord{
+			ID:        id,
+			State:     settleState,
+			Param:     row.Promise.Param,
+			Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
+			Tags:      row.Promise.Tags,
+			TimeoutAt: row.Promise.TimeoutAt,
+			CreatedAt: row.Promise.CreatedAt,
+			SettledAt: &settledAtCopy,
+		}
+
+		intended := settledData{State: settleState, ValHdrs: settleValueHeaders, ValData: settleValueData, SettledAt: settledAtVal}
+		awaiters, _, enqErr := h.enqueueResume(id, origin, row.Callbacks, settledAtVal, settleStmt, settleArgs, intended, yield)
+
+		if errors.Is(enqErr, errConcurrentSettle) {
+			if attempt+1 >= maxSettleRetries {
+				slog.Error("task.fulfill settle: retries exhausted", "id", id)
+				return Res[string]{
+					Kind: "task.fulfill",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+					Data: "settle contended; please retry",
+				}
+			}
+			// Re-read with the same `now`; the loop's top re-validates acquisition.
+			row, err = h.readAndTryTimeout(id, origin, now, yield)
+			if err == gocql.ErrNotFound || (err == nil && row.Task == nil) {
+				return Res[string]{
+					Kind: "task.fulfill",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 404, Version: head.Version},
+					Data: "Task not found",
+				}
+			}
+			if err != nil {
+				slog.Error("task.fulfill re-read", "id", id, "err", err)
+				return Res[string]{
+					Kind: "task.fulfill",
+					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+					Data: err.Error(),
+				}
+			}
+			continue
+		}
+
+		if awaiters == nil && enqErr == nil {
+			// Promise already settled — task is no longer acquired.
+			return Res[string]{
+				Kind: "task.fulfill",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 409, Version: head.Version},
+				Data: "Task not acquired",
+			}
+		}
+		if enqErr != nil {
+			slog.Error("task.fulfill enqueueResume", "id", id, "err", enqErr)
+			return Res[string]{
+				Kind: "task.fulfill",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
+				Data: enqErr.Error(),
+			}
+		}
+
+		for _, a := range awaiters {
+			h.sendExecute(a.target, a.id, a.taskVersion)
+		}
+		h.sendUnblock(row.Listeners, unblockRec)
+
+		// Cleanup (best-effort, only on success).
 		h.Session.Query(
-			`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
+			h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
 		).Exec()
-		yield(LabelTaskFulfillCleanupTaskTimeoutsLease)
-	}
+		yield(LabelTaskFulfillCleanupPromiseTimeouts)
+		if row.TaskTLease != nil {
+			h.Session.Query(
+				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
+				h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+			).Exec()
+			yield(LabelTaskFulfillCleanupTaskTimeoutsLease)
+		}
 
-	// 9. Return settled promise.
-	settledAtFinal := settledAtVal
-	return Res[TaskFulfillResData]{
-		Kind: "task.fulfill",
-		Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
-		Data: TaskFulfillResData{
-			Promise: PromiseRecord{
-				ID:        id,
-				State:     settleState,
-				Param:     row.Promise.Param,
-				Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
-				Tags:      row.Promise.Tags,
-				TimeoutAt: row.Promise.TimeoutAt,
-				CreatedAt: row.Promise.CreatedAt,
-				SettledAt: &settledAtFinal,
+		// Return settled promise.
+		settledAtFinal := settledAtVal
+		return Res[TaskFulfillResData]{
+			Kind: "task.fulfill",
+			Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
+			Data: TaskFulfillResData{
+				Promise: PromiseRecord{
+					ID:        id,
+					State:     settleState,
+					Param:     row.Promise.Param,
+					Value:     Value{Headers: settleValueHeaders, Data: settleValueData},
+					Tags:      row.Promise.Tags,
+					TimeoutAt: row.Promise.TimeoutAt,
+					CreatedAt: row.Promise.CreatedAt,
+					SettledAt: &settledAtFinal,
+				},
 			},
-		},
+		}
 	}
 }
 
