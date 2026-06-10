@@ -15,10 +15,6 @@ var cql string
 // DefaultKeyspace is the keyspace name used when Config.Keyspace is empty.
 const DefaultKeyspace = "resonate"
 
-// DefaultReplication is used when Config.Replication is empty. Suitable for
-// local single-node clusters; cloud/multi-node callers must override.
-const DefaultReplication = "{'class': 'SimpleStrategy', 'replication_factor': 1}"
-
 // Config controls how dbms connects to ScyllaDB and whether it manages schema.
 type Config struct {
 	// Hosts is the seed list. Required. Entries may be bare host or host:port.
@@ -50,7 +46,9 @@ type Config struct {
 	CreateSchema bool
 
 	// Replication is the CQL fragment used in CREATE KEYSPACE WITH replication = ...
-	// Only honored when CreateSchema is true. Defaults to DefaultReplication.
+	// Only honored when CreateSchema is true. When empty, the WITH replication
+	// clause is omitted and ScyllaDB applies its own defaults, which work across
+	// any cluster size.
 	Replication string
 }
 
@@ -68,9 +66,9 @@ func Connect(cfg Config) (*gocql.Session, error) {
 	}
 
 	if cfg.CreateSchema {
-		repl := cfg.Replication
-		if repl == "" {
-			repl = DefaultReplication
+		create := "CREATE KEYSPACE " + keyspace
+		if cfg.Replication != "" {
+			create = fmt.Sprintf("%s WITH replication = %s", create, cfg.Replication)
 		}
 
 		// Phase 1: bootstrap session, no keyspace, recreate keyspace.
@@ -82,9 +80,7 @@ func Connect(cfg Config) (*gocql.Session, error) {
 			bootstrap.Close()
 			return nil, fmt.Errorf("drop keyspace: %w", err)
 		}
-		if err := bootstrap.Query(
-			fmt.Sprintf("CREATE KEYSPACE %s WITH replication = %s", keyspace, repl),
-		).Exec(); err != nil {
+		if err := bootstrap.Query(create).Exec(); err != nil {
 			bootstrap.Close()
 			return nil, fmt.Errorf("create keyspace: %w", err)
 		}
