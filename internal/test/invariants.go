@@ -114,67 +114,42 @@ func AllInvariantsT() []NamedInvariantT {
 // all (origin, id) pairs. Promises with the same id but different origins are
 // distinct rows in the DB and must be tracked independently by invariants.
 func promiseKey(p core.PromiseRecord) string {
-	origin := ""
-	if p.Origin != nil {
-		origin = *p.Origin
-	}
-	return origin + "\x00" + p.ID
+	return p.ID
 }
 
-// taskKey returns a composite key for a TaskRecord that is unique across all
-// (origin, id) pairs.
+// taskKey returns a composite key for a TaskRecord.
 func taskKey(t core.TaskRecord) string {
-	origin := ""
-	if t.Origin != nil {
-		origin = *t.Origin
-	}
-	return origin + "\x00" + t.ID
+	return t.ID
 }
 
 // timeoutKey returns a composite key for a promise TimeoutEntry.
 func timeoutKey(pt core.TimeoutEntry) string {
-	return pt.Origin + "\x00" + pt.ID
+	return pt.ID
 }
 
 // taskTimeoutKey returns a composite key for a TaskTimeoutEntry.
 func taskTimeoutKey(tt core.TaskTimeoutEntry) string {
-	return tt.Origin + "\x00" + tt.ID
+	return tt.ID
 }
 
-// callbackAwaitedKey returns the composite key for the awaited side of a callback.
+// callbackAwaitedKey returns the awaited promise key for a CallbackEntry.
 func callbackAwaitedKey(cb core.CallbackEntry) string {
-	origin := ""
-	if cb.Origin != nil {
-		origin = *cb.Origin
-	}
-	return origin + "\x00" + cb.Awaited
+	return cb.Awaited
 }
 
-// callbackAwaiterKey returns the composite key for the awaiter side of a callback.
+// callbackAwaiterKey returns the awaiter promise key for a CallbackEntry.
 func callbackAwaiterKey(cb core.CallbackEntry) string {
-	origin := ""
-	if cb.Origin != nil {
-		origin = *cb.Origin
-	}
-	return origin + "\x00" + cb.Awaiter
+	return cb.Awaiter
 }
 
-// listenerPromiseKey returns the composite promise key for a ListenerEntry.
+// listenerPromiseKey returns the promise key for a ListenerEntry.
 func listenerPromiseKey(le core.ListenerEntry) string {
-	origin := ""
-	if le.Origin != nil {
-		origin = *le.Origin
-	}
-	return origin + "\x00" + le.ID
+	return le.ID
 }
 
-// scheduleKey returns a composite key for a ScheduleRecord.
+// scheduleKey returns a unique key for a ScheduleRecord.
 func scheduleKey(s core.ScheduleRecord) string {
-	origin := ""
-	if s.Origin != nil {
-		origin = *s.Origin
-	}
-	return origin + "\x00" + s.ID
+	return s.ID
 }
 
 func isSettled(state string) bool {

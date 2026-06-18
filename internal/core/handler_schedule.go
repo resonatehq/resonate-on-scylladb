@@ -80,7 +80,6 @@ func readScheduleRow(session *gocql.Session, origin, id string, yield func(strin
 	}
 	rec := ScheduleRecord{
 		ID:             id,
-		Origin:         &origin,
 		Cron:           sCron,
 		PromiseID:      promiseID,
 		PromiseTimeout: promiseTimeout,
@@ -108,7 +107,7 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 		}
 	}
 
-	origin, _ := resolveOrigin(head.Origin, "", *data.ID)
+	origin := originFromID(*data.ID)
 
 	promiseTags := data.PromiseTags
 	if promiseTags == nil {
@@ -122,8 +121,8 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 	// schedule row, and skips cleanup — safe. token=gocql.RandomUUID() makes this
 	// row distinct from any concurrent ScheduleCreate's pre-insert.
 	if err := h.Session.Query(
-		`INSERT INTO schedule_timeouts (bucket, shard, timeout_at, schedule_id, origin, create_token) VALUES (?, ?, ?, ?, ?, ?)`,
-		h.BucketFor(nextRunAt), h.shardFor(*data.ID), nextRunAt, *data.ID, origin, token,
+		`INSERT INTO schedule_timeouts (bucket, shard, timeout_at, schedule_id, create_token) VALUES (?, ?, ?, ?, ?)`,
+		h.BucketFor(nextRunAt), h.shardFor(*data.ID), nextRunAt, *data.ID, token,
 	).Exec(); err != nil {
 		slog.Error("schedule.create: pre-insert schedule_timeouts", "id", *data.ID, "err", err)
 		return Res[string]{
@@ -180,8 +179,8 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 		// idempotent (same PK) and rolling it back would delete the live entry.
 		if token != existingToken {
 			h.Session.Query(
-				`DELETE FROM schedule_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND schedule_id = ? AND create_token = ?`,
-				h.BucketFor(nextRunAt), h.shardFor(*data.ID), nextRunAt, origin, *data.ID, token,
+				`DELETE FROM schedule_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND schedule_id = ? AND create_token = ?`,
+				h.BucketFor(nextRunAt), h.shardFor(*data.ID), nextRunAt, *data.ID, token,
 			).Exec()
 			yield(LabelScheduleCreateRollbackScheduleTimeouts)
 		}
@@ -225,7 +224,7 @@ func (h *Handler) ScheduleCreate(head RequestHead, data ScheduleCreateData, now 
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) ScheduleGet(head RequestHead, data ScheduleGetData, now int64, yield func(string)) any {
-	origin, _ := resolveOrigin(head.Origin, "", data.ID)
+	origin := originFromID(data.ID)
 	rec, err := readScheduleRow(h.Session, origin, data.ID, yield)
 	if err != nil {
 		slog.Error("schedule.get", "id", data.ID, "err", err)
@@ -242,7 +241,6 @@ func (h *Handler) ScheduleGet(head RequestHead, data ScheduleGetData, now int64,
 			Data: "Schedule not found",
 		}
 	}
-	rec.Origin = nil
 	return Res[ScheduleGetResData]{
 		Kind: "schedule.get",
 		Head: ResponseHead{CorrID: head.CorrID, Status: 200, Version: head.Version},
@@ -255,7 +253,7 @@ func (h *Handler) ScheduleGet(head RequestHead, data ScheduleGetData, now int64,
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) ScheduleDelete(head RequestHead, data ScheduleDeleteData, now int64, yield func(string)) any {
-	origin, _ := resolveOrigin(head.Origin, "", data.ID)
+	origin := originFromID(data.ID)
 	var nextRunAt int64
 	var token gocql.UUID
 	err := h.Session.Query(
@@ -308,8 +306,8 @@ func (h *Handler) ScheduleDelete(head RequestHead, data ScheduleDeleteData, now 
 	}
 
 	if err := h.Session.Query(
-		`DELETE FROM schedule_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND schedule_id = ? AND create_token = ?`,
-		h.BucketFor(nextRunAt), h.shardFor(data.ID), nextRunAt, origin, data.ID, token,
+		`DELETE FROM schedule_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND schedule_id = ? AND create_token = ?`,
+		h.BucketFor(nextRunAt), h.shardFor(data.ID), nextRunAt, data.ID, token,
 	).Exec(); err != nil {
 		slog.Warn("schedule.delete cleanup schedule_timeouts", "id", data.ID, "err", err)
 	}
@@ -333,8 +331,8 @@ func (h *Handler) onScheduleTimeout(origin, id string, timeoutAt int64, token go
 		if err == nil {
 			if delErr := h.Session.Query(
 				`DELETE FROM schedule_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND schedule_id = ? AND create_token = ?`,
-				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id, token,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND schedule_id = ? AND create_token = ?`,
+				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id, token,
 			).Exec(); delErr != nil {
 				slog.Warn("onScheduleTimeout: delete schedule_timeouts", "id", id, "timeout_at", timeoutAt, "err", delErr)
 			}
@@ -401,8 +399,8 @@ func (h *Handler) onScheduleTimeout(origin, id string, timeoutAt int64, token go
 	// Return an error to leave the current entry as the retry anchor.
 	recToken, _ := gocql.ParseUUID(rec.Token)
 	if err = h.Session.Query(
-		`INSERT INTO schedule_timeouts (bucket, shard, timeout_at, schedule_id, origin, create_token) VALUES (?, ?, ?, ?, ?, ?)`,
-		h.BucketFor(finalNextRunAt), h.shardFor(id), finalNextRunAt, id, origin, recToken,
+		`INSERT INTO schedule_timeouts (bucket, shard, timeout_at, schedule_id, create_token) VALUES (?, ?, ?, ?, ?)`,
+		h.BucketFor(finalNextRunAt), h.shardFor(id), finalNextRunAt, id, recToken,
 	).Exec(); err != nil {
 		return err
 	}
@@ -515,8 +513,8 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	// LWT leaves an orphan entry (cleaned up by the timeout loop) rather than a
 	// pending promise with no timeout entry.
 	if err := h.Session.Query(
-		`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
-		h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID, promiseID,
+		`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
+		h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
 	).Exec(); err != nil {
 		slog.Error("createSchedulePromise: pre-insert promise_timeouts", "id", promiseID, "err", err)
 		return false
@@ -528,8 +526,8 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	if target != "" {
 		retryAt = now + RetryTimeout
 		if err := h.Session.Query(
-			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-			h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID, promiseID, timeoutAt,
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+			h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID, timeoutAt,
 		).Exec(); err != nil {
 			slog.Error("createSchedulePromise: pre-insert task_timeouts", "id", promiseID, "err", err)
 			return false
@@ -593,15 +591,15 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	if err != nil {
 		slog.Error("createSchedulePromise", "id", promiseID, "err", err)
 		h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID, promiseID,
+			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+			h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
 		).Exec()
 		yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
 		if target != "" {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID, promiseID,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID,
 			).Exec()
 			yield(LabelScheduleTimeoutRollbackTaskTimeoutsRetry)
 		}
@@ -612,8 +610,8 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 		existingTimeoutAt, _ := row["timeout_at"].(int64)
 		if existingTimeoutAt != timeoutAt {
 			h.Session.Query(
-				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-				h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID, promiseID,
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+				h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
 			).Exec()
 			yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
 		}
@@ -624,8 +622,8 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 			if !(existingTaskState == "pending" && existingRetryAt == retryAt) {
 				h.Session.Query(
 					`DELETE FROM task_timeouts
-					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-					h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID, promiseID,
+					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+					h.BucketFor(retryAt), h.shardFor(promiseID), retryAt, promiseID,
 				).Exec()
 				yield(LabelScheduleTimeoutRollbackTaskTimeoutsRetry)
 			}
@@ -635,7 +633,7 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 
 	// INSERT applied: send execute to the target if set.
 	if target != "" {
-		h.sendExecute(promiseID, target, promiseID, 0)
+		h.sendExecute(target, promiseID, 0)
 	}
 	return true
 }
