@@ -92,7 +92,7 @@ func TestRacePreinsertTickCreate(t *testing.T) {
 		t.Helper()
 		snapReq, _ := json.Marshal(map[string]any{
 			"kind": "debug.snap",
-			"head": makeHead(nil, now0, nil),
+			"head": makeHead(now0),
 			"data": map[string]any{},
 		})
 		snapBytes, err := h.Handle(snapReq, func(string) {})

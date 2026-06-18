@@ -54,7 +54,7 @@ type snapData struct {
 // Pool of identifiers used by chaosOp and guidedOps. The promise pool is
 // per-seed (pickPromisePool, threaded as a parameter); the rest are constants
 // shared across all seeds. diffOrigins is per-seed and dynamic — initialized
-// from promiseIDs[0] and expanded as scheduled promises appear.
+// from uniqueOrigins(promiseIDs) and expanded as scheduled promises appear.
 var (
 	diffScheduleIDs = []string{"sched-0", "sched-1"}
 	diffPIDs        = []string{"worker-1", "worker-2"}
@@ -62,30 +62,47 @@ var (
 	diffTaskTTL     = int64(30_000)
 )
 
-// promiseOrigin returns the effective origin for a promise: the resonate:origin
-// tag if set and non-empty, otherwise the promise ID itself.
-func promiseOrigin(id string, tags map[string]any) string {
-	if tags != nil {
-		if o, ok := tags["resonate:origin"].(string); ok && o != "" {
-			return o
-		}
-	}
-	return id
-}
-
-// makeHead builds a request head. When rng is non-nil, resonate:origin is
-// picked from origins and included; pass nil rng for debug.snap/debug.tick
-// ops where origin is irrelevant (origins is ignored when rng is nil).
-func makeHead(rng *seededRandom, now int64, origins []string) map[string]any {
-	h := map[string]any{
+func makeHead(now int64) map[string]any {
+	return map[string]any{
 		"corrId":              fmt.Sprintf("corr-%d", rand.Int63()),
 		"version":             "1.0.0",
 		"resonate:debug_time": now,
 	}
-	if rng != nil {
-		h["resonate:origin"] = origins[rng.choice(len(origins))]
+}
+
+// groupByOrigin groups IDs by originFromID(id).
+func groupByOrigin(ids []string) map[string][]string {
+	m := make(map[string][]string)
+	for _, id := range ids {
+		o := originFromID(id)
+		m[o] = append(m[o], id)
 	}
-	return h
+	return m
+}
+
+// sortedKeys returns sorted keys of a string→[]string map for deterministic iteration.
+func sortedKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// uniqueOrigins returns sorted unique origins derived from ids via originFromID.
+func uniqueOrigins(ids []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, id := range ids {
+		o := originFromID(id)
+		if !seen[o] {
+			seen[o] = true
+			result = append(result, o)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 // expandOriginPool scans snap for scheduled promises and adds their origins to
@@ -104,7 +121,7 @@ func expandOriginPool(diffOrigins *[]string, snap *snapData) {
 			continue
 		}
 		id, _ := p["id"].(string)
-		o := promiseOrigin(id, tags)
+		o := originFromID(id)
 		if !seen[o] {
 			seen[o] = true
 			*diffOrigins = append(*diffOrigins, o)
@@ -114,146 +131,161 @@ func expandOriginPool(diffOrigins *[]string, snap *snapData) {
 
 func generateRequest(rng *seededRandom, now int64, snap *snapData, promiseIDs []string, diffOrigins []string) map[string]any {
 	if snap == nil || rng.next() < 0.2 {
-		return chaosOp(rng, now, promiseIDs, diffOrigins)
+		return chaosOp(rng, now, promiseIDs)
 	}
 	guided := guidedOps(rng, now, snap, promiseIDs, diffOrigins)
 	if len(guided) == 0 {
-		return chaosOp(rng, now, promiseIDs, diffOrigins)
+		return chaosOp(rng, now, promiseIDs)
 	}
 	return guided[rng.choice(len(guided))]
 }
 
-func chaosOp(rng *seededRandom, now int64, promiseIDs []string, diffOrigins []string) map[string]any {
+func chaosOp(rng *seededRandom, now int64, promiseIDs []string) map[string]any {
+	byOrigin := groupByOrigin(promiseIDs)
+	origins := sortedKeys(byOrigin)
+
+	// pickID picks a random origin then a random ID from that origin's group.
+	pickID := func() string {
+		o := origins[rng.choice(len(origins))]
+		ids := byOrigin[o]
+		return ids[rng.choice(len(ids))]
+	}
+	// pickPair picks two IDs from the same random origin (may be equal for singleton origins).
+	pickPair := func() (string, string) {
+		o := origins[rng.choice(len(origins))]
+		ids := byOrigin[o]
+		return ids[rng.choice(len(ids))], ids[rng.choice(len(ids))]
+	}
+
 	ops := []func() map[string]any{
 		func() map[string]any {
-			return map[string]any{"kind": "promise.get", "head": makeHead(rng, now, diffOrigins),
-				"data": map[string]any{"id": promiseIDs[rng.choice(len(promiseIDs))]}}
+			return map[string]any{"kind": "promise.get", "head": makeHead(now),
+				"data": map[string]any{"id": pickID()}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": promiseIDs[rng.choice(len(promiseIDs))], "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
-				"param": map[string]any{}, "tags": map[string]any{"resonate:origin": diffOrigins[rng.choice(len(diffOrigins))]},
+			return map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
+				"id": pickID(), "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
+				"param": map[string]any{}, "tags": map[string]any{},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": promiseIDs[rng.choice(len(promiseIDs))], "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
-				"param": map[string]any{}, "tags": map[string]any{"resonate:target": "http://worker", "resonate:origin": diffOrigins[rng.choice(len(diffOrigins))]},
+			return map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
+				"id": pickID(), "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
+				"param": map[string]any{}, "tags": map[string]any{"resonate:target": "http://worker"},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": promiseIDs[rng.choice(len(promiseIDs))], "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
+			return map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
+				"id": pickID(), "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
 				"param": map[string]any{}, "tags": map[string]any{"resonate:timer": "true"},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.settle", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id":    promiseIDs[rng.choice(len(promiseIDs))],
+			return map[string]any{"kind": "promise.settle", "head": makeHead(now), "data": map[string]any{
+				"id":    pickID(),
 				"state": []string{"resolved", "rejected", "rejected_canceled"}[rng.choice(3)],
 				"value": map[string]any{},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.register_callback", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"awaited": promiseIDs[rng.choice(len(promiseIDs))],
-				"awaiter": promiseIDs[rng.choice(len(promiseIDs))],
+			awaited, awaiter := pickPair()
+			return map[string]any{"kind": "promise.register_callback", "head": makeHead(now), "data": map[string]any{
+				"awaited": awaited,
+				"awaiter": awaiter,
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "promise.register_listener", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"awaited": promiseIDs[rng.choice(len(promiseIDs))],
+			return map[string]any{"kind": "promise.register_listener", "head": makeHead(now), "data": map[string]any{
+				"awaited": pickID(),
 				"address": diffPIDs[rng.choice(len(diffPIDs))],
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "task.get", "head": makeHead(rng, now, diffOrigins),
-				"data": map[string]any{"id": promiseIDs[rng.choice(len(promiseIDs))]}}
+			return map[string]any{"kind": "task.get", "head": makeHead(now),
+				"data": map[string]any{"id": pickID()}}
 		},
 		func() map[string]any {
-			id := promiseIDs[rng.choice(len(promiseIDs))]
-			return map[string]any{"kind": "task.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			id := pickID()
+			return map[string]any{"kind": "task.create", "head": makeHead(now), "data": map[string]any{
 				"pid": diffPIDs[rng.choice(len(diffPIDs))], "ttl": diffTaskTTL,
-				"action": map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+				"action": map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
 					"id": id, "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
-					"param": map[string]any{}, "tags": map[string]any{"resonate:target": "http://worker", "resonate:origin": diffOrigins[rng.choice(len(diffOrigins))]},
+					"param": map[string]any{}, "tags": map[string]any{"resonate:target": "http://worker"},
 				}},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "task.acquire", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": promiseIDs[rng.choice(len(promiseIDs))], "version": rng.choice(4),
+			return map[string]any{"kind": "task.acquire", "head": makeHead(now), "data": map[string]any{
+				"id": pickID(), "version": rng.choice(4),
 				"pid": diffPIDs[rng.choice(len(diffPIDs))], "ttl": diffTaskTTL,
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "task.release", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": promiseIDs[rng.choice(len(promiseIDs))], "version": rng.choice(4),
+			return map[string]any{"kind": "task.release", "head": makeHead(now), "data": map[string]any{
+				"id": pickID(), "version": rng.choice(4),
 			}}
 		},
 		func() map[string]any {
-			id := promiseIDs[rng.choice(len(promiseIDs))]
-			return map[string]any{"kind": "task.fulfill", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			id := pickID()
+			return map[string]any{"kind": "task.fulfill", "head": makeHead(now), "data": map[string]any{
 				"id": id, "version": rng.choice(4),
-				"action": map[string]any{"kind": "promise.settle", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+				"action": map[string]any{"kind": "promise.settle", "head": makeHead(now), "data": map[string]any{
 					"id": id, "state": []string{"resolved", "rejected"}[rng.choice(2)], "value": map[string]any{},
 				}},
 			}}
 		},
 		func() map[string]any {
-			id := promiseIDs[rng.choice(len(promiseIDs))]
-			awaited := rng.choiceExcluding(promiseIDs, id)
-			return map[string]any{"kind": "task.suspend", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			id, awaited := pickPair()
+			return map[string]any{"kind": "task.suspend", "head": makeHead(now), "data": map[string]any{
 				"id": id, "version": rng.choice(4),
-				"actions": []any{map[string]any{"kind": "promise.register_callback", "head": makeHead(rng, now, diffOrigins),
+				"actions": []any{map[string]any{"kind": "promise.register_callback", "head": makeHead(now),
 					"data": map[string]any{"awaited": awaited, "awaiter": id}}},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "task.halt", "head": makeHead(rng, now, diffOrigins),
-				"data": map[string]any{"id": promiseIDs[rng.choice(len(promiseIDs))]}}
+			return map[string]any{"kind": "task.halt", "head": makeHead(now),
+				"data": map[string]any{"id": pickID()}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "task.continue", "head": makeHead(rng, now, diffOrigins),
-				"data": map[string]any{"id": promiseIDs[rng.choice(len(promiseIDs))]}}
+			return map[string]any{"kind": "task.continue", "head": makeHead(now),
+				"data": map[string]any{"id": pickID()}}
 		},
 		func() map[string]any {
-			id := promiseIDs[rng.choice(len(promiseIDs))]
-			tags := map[string]any{"resonate:origin": diffOrigins[rng.choice(len(diffOrigins))]}
+			taskID, innerID := pickPair()
+			tags := map[string]any{}
 			if rng.next() < 0.5 {
 				tags["resonate:target"] = "http://worker"
 			}
-			return map[string]any{"kind": "task.fence", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-				"id": id, "version": rng.choice(4),
-				"action": map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
-					"id": promiseIDs[rng.choice(len(promiseIDs))], "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
+			return map[string]any{"kind": "task.fence", "head": makeHead(now), "data": map[string]any{
+				"id": taskID, "version": rng.choice(4),
+				"action": map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
+					"id": innerID, "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
 					"param": map[string]any{}, "tags": tags,
 				}},
 			}}
 		},
 		func() map[string]any {
-			id := promiseIDs[rng.choice(len(promiseIDs))]
-			return map[string]any{"kind": "task.heartbeat", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			return map[string]any{"kind": "task.heartbeat", "head": makeHead(now), "data": map[string]any{
 				"pid":   diffPIDs[rng.choice(len(diffPIDs))],
-				"tasks": []any{map[string]any{"id": id, "version": rng.choice(4)}},
+				"tasks": []any{map[string]any{"id": pickID(), "version": rng.choice(4)}},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "debug.tick", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{"time": now}}
+			return map[string]any{"kind": "debug.tick", "head": makeHead(now), "data": map[string]any{"time": now}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "schedule.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			return map[string]any{"kind": "schedule.create", "head": makeHead(now), "data": map[string]any{
 				"id": diffScheduleIDs[rng.choice(len(diffScheduleIDs))], "cron": "* * * * *",
 				"promiseId":      diffScheduleIDs[rng.choice(len(diffScheduleIDs))] + "-{{.timestamp}}",
 				"promiseTimeout": int64(30_000), "promiseParam": map[string]any{}, "promiseTags": map[string]any{},
 			}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "schedule.get", "head": makeHead(rng, now, diffOrigins),
+			return map[string]any{"kind": "schedule.get", "head": makeHead(now),
 				"data": map[string]any{"id": diffScheduleIDs[rng.choice(len(diffScheduleIDs))]}}
 		},
 		func() map[string]any {
-			return map[string]any{"kind": "schedule.delete", "head": makeHead(rng, now, diffOrigins),
+			return map[string]any{"kind": "schedule.delete", "head": makeHead(now),
 				"data": map[string]any{"id": diffScheduleIDs[rng.choice(len(diffScheduleIDs))]}}
 		},
 	}
@@ -263,26 +295,37 @@ func chaosOp(rng *seededRandom, now int64, promiseIDs []string, diffOrigins []st
 func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string, diffOrigins []string) []map[string]any {
 	var ops []map[string]any
 
-	// Pick an origin for this guided op batch.
-	o := diffOrigins[rng.choice(len(diffOrigins))]
-
-	// Build a map from promise ID to its resolved origin.
-	pidOrigin := make(map[string]string, len(snap.Promises))
+	// Pick an origin strategically: prefer origins with active state (pending
+	// promises or pending/acquired/halted tasks). Fall back to random if none.
+	activeSet := make(map[string]bool)
+	for _, t := range snap.Tasks {
+		id, _ := t["id"].(string)
+		switch t["state"] {
+		case "pending", "acquired", "halted":
+			activeSet[originFromID(id)] = true
+		}
+	}
 	for _, p := range snap.Promises {
 		id, _ := p["id"].(string)
-		tags, _ := p["tags"].(map[string]any)
-		pidOrigin[id] = promiseOrigin(id, tags)
-	}
-
-	resolveOrigin := func(id string) string {
-		if orig, ok := pidOrigin[id]; ok {
-			return orig
+		if p["state"] == "pending" {
+			activeSet[originFromID(id)] = true
 		}
-		return id
 	}
+	var activeOrigins []string
+	for _, o := range diffOrigins {
+		if activeSet[o] {
+			activeOrigins = append(activeOrigins, o)
+		}
+	}
+	candidateOrigins := diffOrigins
+	if len(activeOrigins) > 0 {
+		candidateOrigins = activeOrigins
+	}
+	o := candidateOrigins[rng.choice(len(candidateOrigins))]
 
 	createdIDs := map[string]bool{}
-	for id := range pidOrigin {
+	for _, p := range snap.Promises {
+		id, _ := p["id"].(string)
 		createdIDs[id] = true
 	}
 
@@ -291,7 +334,7 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 	var pendingPromises []map[string]any
 	for _, t := range snap.Tasks {
 		id, _ := t["id"].(string)
-		if resolveOrigin(id) != o {
+		if originFromID(id) != o {
 			continue
 		}
 		switch t["state"] {
@@ -305,7 +348,7 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 	}
 	for _, p := range snap.Promises {
 		id, _ := p["id"].(string)
-		if resolveOrigin(id) != o {
+		if originFromID(id) != o {
 			continue
 		}
 		if p["state"] == "pending" {
@@ -313,22 +356,21 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 		}
 	}
 
-	// Create uncreated promises whose ID equals the selected origin (uncreated
-	// promises have no tags, so their origin is their ID).
+	// Create uncreated promises in origin o.
 	for _, id := range promiseIDs {
-		if !createdIDs[id] && id == o {
+		if !createdIDs[id] && originFromID(id) == o {
 			id := id
-			ops = append(ops, map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			ops = append(ops, map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
 				"id": id, "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))], "param": map[string]any{},
 				"tags": map[string]any{"resonate:origin": o},
 			}})
-			ops = append(ops, map[string]any{"kind": "promise.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			ops = append(ops, map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
 				"id": id, "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))], "param": map[string]any{},
 				"tags": map[string]any{"resonate:target": "http://worker", "resonate:origin": o},
 			}})
-			ops = append(ops, map[string]any{"kind": "task.create", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+			ops = append(ops, map[string]any{"kind": "task.create", "head": makeHead(now), "data": map[string]any{
 				"pid": diffPIDs[rng.choice(len(diffPIDs))], "ttl": diffTaskTTL,
-				"action": map[string]any{"kind": "promise.create", "head": makeHead(rng, now, []string{o}), "data": map[string]any{
+				"action": map[string]any{"kind": "promise.create", "head": makeHead(now), "data": map[string]any{
 					"id": id, "timeoutAt": diffTimeouts[rng.choice(len(diffTimeouts))],
 					"param": map[string]any{}, "tags": map[string]any{"resonate:target": "http://worker", "resonate:origin": o},
 				}},
@@ -339,7 +381,7 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 	// Acquire pending tasks.
 	for _, t := range pendingTasks {
 		t := t
-		ops = append(ops, map[string]any{"kind": "task.acquire", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+		ops = append(ops, map[string]any{"kind": "task.acquire", "head": makeHead(now), "data": map[string]any{
 			"id": t["id"], "version": int(t["version"].(float64)),
 			"pid": diffPIDs[rng.choice(len(diffPIDs))], "ttl": diffTaskTTL,
 		}})
@@ -351,12 +393,12 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 		id := t["id"].(string)
 		version := int(t["version"].(float64))
 
-		ops = append(ops, map[string]any{"kind": "task.release", "head": makeHead(rng, now, diffOrigins),
+		ops = append(ops, map[string]any{"kind": "task.release", "head": makeHead(now),
 			"data": map[string]any{"id": id, "version": version}})
 
-		ops = append(ops, map[string]any{"kind": "task.fulfill", "head": makeHead(rng, now, []string{o}), "data": map[string]any{
+		ops = append(ops, map[string]any{"kind": "task.fulfill", "head": makeHead(now), "data": map[string]any{
 			"id": id, "version": version,
-			"action": map[string]any{"kind": "promise.settle", "head": makeHead(rng, now, []string{o}), "data": map[string]any{
+			"action": map[string]any{"kind": "promise.settle", "head": makeHead(now), "data": map[string]any{
 				"id": id, "state": []string{"resolved", "rejected"}[rng.choice(2)], "value": map[string]any{},
 			}},
 		}})
@@ -370,14 +412,14 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 		}
 		if len(sameOriginAwaitable) > 0 {
 			awaited := sameOriginAwaitable[rng.choice(len(sameOriginAwaitable))]["id"].(string)
-			ops = append(ops, map[string]any{"kind": "task.suspend", "head": makeHead(rng, now, []string{o}), "data": map[string]any{
+			ops = append(ops, map[string]any{"kind": "task.suspend", "head": makeHead(now), "data": map[string]any{
 				"id": id, "version": version,
-				"actions": []any{map[string]any{"kind": "promise.register_callback", "head": makeHead(rng, now, []string{o}),
+				"actions": []any{map[string]any{"kind": "promise.register_callback", "head": makeHead(now),
 					"data": map[string]any{"awaited": awaited, "awaiter": id}}},
 			}})
 		}
 
-		ops = append(ops, map[string]any{"kind": "task.heartbeat", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+		ops = append(ops, map[string]any{"kind": "task.heartbeat", "head": makeHead(now), "data": map[string]any{
 			"pid":   diffPIDs[rng.choice(len(diffPIDs))],
 			"tasks": []any{map[string]any{"id": id, "version": version}},
 		}})
@@ -386,21 +428,21 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 	// Halt pending/acquired tasks.
 	for _, t := range append(pendingTasks, acquiredTasks...) {
 		t := t
-		ops = append(ops, map[string]any{"kind": "task.halt", "head": makeHead(rng, now, diffOrigins),
+		ops = append(ops, map[string]any{"kind": "task.halt", "head": makeHead(now),
 			"data": map[string]any{"id": t["id"]}})
 	}
 
 	// Continue halted tasks.
 	for _, t := range haltedTasks {
 		t := t
-		ops = append(ops, map[string]any{"kind": "task.continue", "head": makeHead(rng, now, diffOrigins),
+		ops = append(ops, map[string]any{"kind": "task.continue", "head": makeHead(now),
 			"data": map[string]any{"id": t["id"]}})
 	}
 
 	// Settle pending promises in origin o.
 	for _, p := range pendingPromises {
 		p := p
-		ops = append(ops, map[string]any{"kind": "promise.settle", "head": makeHead(rng, now, diffOrigins), "data": map[string]any{
+		ops = append(ops, map[string]any{"kind": "promise.settle", "head": makeHead(now), "data": map[string]any{
 			"id":    p["id"],
 			"state": []string{"resolved", "rejected", "rejected_canceled"}[rng.choice(3)],
 			"value": map[string]any{},
@@ -434,7 +476,7 @@ func guidedOps(rng *seededRandom, now int64, snap *snapData, promiseIDs []string
 		}
 		tickTime := int64(minT)
 		if tickTime <= now+maxTickJump {
-			ops = append(ops, map[string]any{"kind": "debug.tick", "head": makeHead(rng, now, diffOrigins),
+			ops = append(ops, map[string]any{"kind": "debug.tick", "head": makeHead(now),
 				"data": map[string]any{"time": tickTime}})
 		}
 	}
@@ -568,7 +610,7 @@ func TestHandlerDiff(t *testing.T) {
 
 	for seed := baseSeed; seed < baseSeed+int64(iterations); seed++ {
 		promiseIDs := pickPromisePool(seed)
-		diffOrigins := []string{promiseIDs[0]}
+		diffOrigins := uniqueOrigins(promiseIDs)
 		rng := newRng(seed)
 		goSrv := New()
 		now := int64(0)
@@ -645,7 +687,7 @@ func TestHandlerDiff(t *testing.T) {
 
 			// Compare full state via snap after every step.
 			{
-				snapReq := map[string]any{"kind": "debug.snap", "head": makeHead(nil, now, nil), "data": map[string]any{}}
+				snapReq := map[string]any{"kind": "debug.snap", "head": makeHead(now), "data": map[string]any{}}
 				snapReqBytes, _ := json.Marshal(snapReq)
 
 				goSnapBytes, _ := goSrv.Apply(now, snapReqBytes)
@@ -705,7 +747,7 @@ func TestHandlerDiff(t *testing.T) {
 
 // snapDataFromOracle extracts a *snapData from the oracle for guided op generation.
 func snapDataFromOracle(srv *Server, now int64) *snapData {
-	req := map[string]any{"kind": "debug.snap", "head": makeHead(nil, now, nil), "data": map[string]any{}}
+	req := map[string]any{"kind": "debug.snap", "head": makeHead(now), "data": map[string]any{}}
 	reqBytes, _ := json.Marshal(req)
 	respBytes, _ := srv.Apply(now, reqBytes)
 	var resp map[string]any

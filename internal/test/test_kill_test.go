@@ -145,7 +145,7 @@ func checkKillInvariants(t *testing.T, h *core.Handler, seed int64, promises int
 	t.Helper()
 	snapReq, _ := json.Marshal(map[string]any{
 		"kind": "debug.snap",
-		"head": makeHead(nil, now, nil),
+		"head": makeHead(now),
 		"data": map[string]any{},
 	})
 	snapBytes, err := h.Handle(snapReq, func(string) {})

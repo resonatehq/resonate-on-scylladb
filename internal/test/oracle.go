@@ -463,6 +463,9 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if d.Awaited == d.Awaiter {
 			return s.respond(kind, 400, "data: Awaited and awaiter must be different promises")
 		}
+		if originFromID(d.Awaited) != originFromID(d.Awaiter) {
+			return s.respond(kind, 400, "awaiter and awaited must belong to the same origin")
+		}
 		awaitedOrigin := originFromID(d.Awaited)
 		awaiterOrigin := originFromID(d.Awaiter)
 		return s.promiseRegisterCallback(now, awaitedOrigin, d.Awaited, awaiterOrigin, d.Awaiter)
@@ -531,6 +534,11 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		}
 		if len(validationErrs) > 0 {
 			return s.respond(kind, 400, strings.Join(validationErrs, "; "))
+		}
+		for _, a := range d.Actions {
+			if originFromID(a.Data.Awaited) != taskOrigin {
+				return s.respond(kind, 400, "All action awaited IDs must belong to the same origin as the task")
+			}
 		}
 		pairs := make([][4]string, len(d.Actions))
 		for i, a := range d.Actions {
