@@ -309,7 +309,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	// 2a. Pre-insert promise_timeouts (and task_timeouts for tasks) before the LWT so
 	// kills between here and the LWT leave orphan entries rather than a committed
 	// promise/task row with no corresponding timeout entry.
-	if state == "pending" {
+	if state == "pending" && hasTask {
 		if err := h.Session.Query(
 			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
 			h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id,
@@ -321,19 +321,17 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 			}
 		}
 		yield(LabelPromiseCreatePreinsertPromiseTimeouts)
-		if hasTask {
-			if err := h.Session.Query(
-				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
-				h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id, *req.TimeoutAt,
-			).Exec(); err != nil {
-				slog.Error("promise.create: pre-insert task_timeouts", "id", id, "err", err)
-				return Res[PromiseCreateResData]{
-					Kind: "promise.create",
-					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-				}
+		if err := h.Session.Query(
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+			h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id, *req.TimeoutAt,
+		).Exec(); err != nil {
+			slog.Error("promise.create: pre-insert task_timeouts", "id", id, "err", err)
+			return Res[PromiseCreateResData]{
+				Kind: "promise.create",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
 			}
-			yield(LabelPromiseCreatePreinsertTaskTimeoutsRetry)
 		}
+		yield(LabelPromiseCreatePreinsertTaskTimeoutsRetry)
 	}
 
 	// 2b. LWT INSERT — task_timeout_retry is included atomically so that
@@ -400,7 +398,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 		// existing task is pending with the same retry deadline (task_timeouts
 		// type=0). Settled promises and non-pending tasks have no legitimate
 		// hint row, so any entry at that PK is the one we just pre-inserted.
-		if state == "pending" {
+		if state == "pending" && hasTask {
 			if !(existingState == "pending" && existingTimeoutAt == *req.TimeoutAt) {
 				h.Session.Query(
 					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
@@ -408,17 +406,15 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 				).Exec()
 				yield(LabelPromiseCreateRollbackPromiseTimeouts)
 			}
-			if hasTask {
-				existingTaskState, _ := row["task_state"].(string)
-				existingRetryAt, _ := row["task_timeout_retry"].(int64)
-				if !(existingTaskState == "pending" && existingRetryAt == taskRetryAt) {
-					h.Session.Query(
-						`DELETE FROM task_timeouts
-						 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
-						h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id,
-					).Exec()
-					yield(LabelPromiseCreateRollbackTaskTimeoutsRetry)
-				}
+			existingTaskState, _ := row["task_state"].(string)
+			existingRetryAt, _ := row["task_timeout_retry"].(int64)
+			if !(existingTaskState == "pending" && existingRetryAt == taskRetryAt) {
+				h.Session.Query(
+					`DELETE FROM task_timeouts
+					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+					h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id,
+				).Exec()
+				yield(LabelPromiseCreateRollbackTaskTimeoutsRetry)
 			}
 		}
 
@@ -834,12 +830,12 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 		h.sendUnblock(row.Listeners, unblockRec)
 
 		// 7. Cleanup (best-effort, only on success).
-		h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
-			h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, id,
-		).Exec()
-		yield(LabelPromiseSettleCleanupPromiseTimeouts)
 		if row.Target != "" {
+			h.Session.Query(
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+				h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, id,
+			).Exec()
+			yield(LabelPromiseSettleCleanupPromiseTimeouts)
 			if row.TaskTRetry != nil {
 				h.Session.Query(
 					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,

@@ -509,21 +509,20 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 		return true
 	}
 
-	// Pre-insert promise_timeouts before the LWT so a kill between here and the
-	// LWT leaves an orphan entry (cleaned up by the timeout loop) rather than a
-	// pending promise with no timeout entry.
-	if err := h.Session.Query(
-		`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
-		h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
-	).Exec(); err != nil {
-		slog.Error("createSchedulePromise: pre-insert promise_timeouts", "id", promiseID, "err", err)
-		return false
-	}
-	yield(LabelScheduleTimeoutPreinsertPromiseTimeouts)
-
-	// Pre-insert task_timeouts before the LWT when target is set.
+	// Pre-insert promise_timeouts and task_timeouts before the LWT when target
+	// is set, so a kill between here and the LWT leaves orphan entries (cleaned
+	// up by the timeout loop) rather than a pending promise/task with no entry.
 	var retryAt int64
 	if target != "" {
+		if err := h.Session.Query(
+			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
+			h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
+		).Exec(); err != nil {
+			slog.Error("createSchedulePromise: pre-insert promise_timeouts", "id", promiseID, "err", err)
+			return false
+		}
+		yield(LabelScheduleTimeoutPreinsertPromiseTimeouts)
+
 		retryAt = now + RetryTimeout
 		if err := h.Session.Query(
 			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
@@ -590,12 +589,12 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	yield(LabelScheduleTimeoutCommitPromises)
 	if err != nil {
 		slog.Error("createSchedulePromise", "id", promiseID, "err", err)
-		h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
-			h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
-		).Exec()
-		yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
 		if target != "" {
+			h.Session.Query(
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+				h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
+			).Exec()
+			yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
 			h.Session.Query(
 				`DELETE FROM task_timeouts
 				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
@@ -606,17 +605,17 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 		return false
 	}
 	if !applied {
-		// Rollback promise_timeouts unless the existing promise owns the same entry.
-		existingTimeoutAt, _ := row["timeout_at"].(int64)
-		if existingTimeoutAt != timeoutAt {
-			h.Session.Query(
-				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
-				h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
-			).Exec()
-			yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
-		}
-		// Rollback task_timeouts unless the existing task owns the same retry entry.
 		if target != "" {
+			// Rollback promise_timeouts unless the existing promise owns the same entry.
+			existingTimeoutAt, _ := row["timeout_at"].(int64)
+			if existingTimeoutAt != timeoutAt {
+				h.Session.Query(
+					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+					h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,
+				).Exec()
+				yield(LabelScheduleTimeoutRollbackPromiseTimeouts)
+			}
+			// Rollback task_timeouts unless the existing task owns the same retry entry.
 			existingTaskState, _ := row["task_state"].(string)
 			existingRetryAt, _ := row["task_timeout_retry"].(int64)
 			if !(existingTaskState == "pending" && existingRetryAt == retryAt) {
