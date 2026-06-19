@@ -100,10 +100,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # TEMPORARY: pin to feat/protocol-updates until merged into main
       - name: Checkout resonate-test
         uses: actions/checkout@v6
         with:
           repository: resonatehq/resonate-test
+          ref: feat/protocol-updates
           token: ${{ secrets.TESTBED_TOKEN }}
           path: test/resonate-test
 
