@@ -399,7 +399,9 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 		// type=0). Settled promises and non-pending tasks have no legitimate
 		// hint row, so any entry at that PK is the one we just pre-inserted.
 		if state == "pending" && hasTask {
-			if !(existingState == "pending" && existingTimeoutAt == *req.TimeoutAt) {
+			existingTarget, _ := row["target"].(string)
+			existingHasTask := existingTarget != ""
+			if !existingHasTask || !(existingState == "pending" && existingTimeoutAt == *req.TimeoutAt) {
 				h.Session.Query(
 					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
 					h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id,

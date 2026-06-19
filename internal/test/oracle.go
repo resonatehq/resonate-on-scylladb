@@ -737,9 +737,9 @@ func (s *Server) promiseCreate(now int64, origin, id string, timeoutAt int64, pa
 		Listeners: make(map[string]struct{}),
 	}
 	s.setPromise(origin, id, p)
-	s.setPTimeout(PTimeout{id, timeoutAt})
 
 	if addr := tags["resonate:target"]; addr != "" {
+		s.setPTimeout(PTimeout{id, timeoutAt})
 		delayVal := tags["resonate:delay"]
 		delay := int64(0)
 		deferred := false

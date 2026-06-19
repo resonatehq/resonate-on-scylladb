@@ -607,8 +607,11 @@ func (h *Handler) createSchedulePromise(promiseID string, s *ScheduleRecord, fir
 	if !applied {
 		if target != "" {
 			// Rollback promise_timeouts unless the existing promise owns the same entry.
+			existingTarget, _ := row["target"].(string)
+			existingHasTask := existingTarget != ""
 			existingTimeoutAt, _ := row["timeout_at"].(int64)
-			if existingTimeoutAt != timeoutAt {
+			existingState, _ := row["state"].(string)
+			if !existingHasTask || !(existingState == "pending" && existingTimeoutAt == timeoutAt) {
 				h.Session.Query(
 					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
 					h.BucketFor(timeoutAt), h.shardFor(promiseID), timeoutAt, promiseID,

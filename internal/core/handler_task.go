@@ -205,7 +205,9 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 		if state == "pending" {
 			existingState, _ := row["state"].(string)
 			existingTimeoutAt, _ := row["timeout_at"].(int64)
-			if !(existingState == "pending" && existingTimeoutAt == *inner.TimeoutAt) {
+			existingTarget, _ := row["target"].(string)
+			existingHasTask := existingTarget != ""
+			if !existingHasTask || !(existingState == "pending" && existingTimeoutAt == *inner.TimeoutAt) {
 				h.Session.Query(
 					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
 					h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, id,
