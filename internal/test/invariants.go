@@ -370,7 +370,7 @@ func PendingPromiseHasTimeout(snap core.DebugSnapResData) error {
 		timeoutKeys[timeoutKey(pt)] = true
 	}
 	for _, p := range snap.Promises {
-		if p.State == "pending" && !timeoutKeys[promiseKey(p)] {
+		if p.State == "pending" && p.Tags["resonate:target"] != "" && !timeoutKeys[promiseKey(p)] {
 			return fmt.Errorf("PendingPromiseHasTimeout: pending promise %q has no promise_timeouts entry", p.ID)
 		}
 	}

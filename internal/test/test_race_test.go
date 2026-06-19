@@ -5,7 +5,7 @@ package test
 //
 // The scenario being tested:
 //
-//  1. Spawn promise.create "race-p" timeoutAt=T (now < T).
+//  1. Spawn promise.create "race-p" timeoutAt=T (now < T) with resonate:target tag.
 //     - Fiber advances ONE step: pre-inserts promise_timeouts, then yields.
 //     - Fiber is killed — LWT never runs. DB has promise_timeouts but no promise.
 //
@@ -63,7 +63,7 @@ func TestRacePreinsertTickCreate(t *testing.T) {
 				"id":        promiseID,
 				"timeoutAt": timeoutAt,
 				"param":     map[string]any{},
-				"tags":      map[string]any{},
+				"tags":      map[string]any{"resonate:target": "race-recv.race-p"},
 			},
 		})
 		return b
