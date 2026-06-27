@@ -92,3 +92,11 @@ docker compose -f docker-compose.test.yml -p resonate-kill --profile kill up --b
 # Linearizability tests
 docker compose -f docker-compose.test.yml -p resonate-linz --profile linearizability up --build --abort-on-container-exit --exit-code-from tester-linearizability; docker compose -p resonate-linz down
 ```
+
+## License
+
+`resonate-on-scylladb` is licensed under the [Business Source License 1.1](LICENSE) (BUSL-1.1).
+
+This is **not** an open-source license. Non-production use (development, testing, evaluation) is permitted. **Any production use requires a commercial license from Resonate HQ, Inc.** On the Change Date (2030-07-01), each released version converts to the Apache License, Version 2.0.
+
+For commercial licensing, contact licensing@resonatehq.io.
