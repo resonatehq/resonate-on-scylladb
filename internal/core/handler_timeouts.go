@@ -68,15 +68,15 @@ func (h *Handler) bucketsToScan(t int64) []int64 {
 func (h *Handler) TickPromiseTimeoutsAt(ctx context.Context, t int64, shard int16, yield func(string)) {
 	for _, b := range h.bucketsToScan(t) {
 		iter := h.Session.Query(
-			`SELECT timeout_at, promise_id, origin FROM promise_timeouts
+			`SELECT timeout_at, promise_id FROM promise_timeouts
 			 WHERE bucket = ? AND shard = ? AND timeout_at <= ?`,
 			b, shard, t,
 		).Iter()
 		yield(LabelPromiseTimeoutScanPromiseTimeouts)
 
 		var ptTimeout int64
-		var ptID, ptOrigin string
-		for iter.Scan(&ptTimeout, &ptID, &ptOrigin) {
+		var ptID string
+		for iter.Scan(&ptTimeout, &ptID) {
 			yield(LabelPromiseTimeoutScanRowPromiseTimeouts)
 			select {
 			case <-ctx.Done():
@@ -84,8 +84,8 @@ func (h *Handler) TickPromiseTimeoutsAt(ctx context.Context, t int64, shard int1
 				return
 			default:
 			}
-			slog.Debug("timeout.process", "kind", "promise", "shard", shard, "bucket", b, "timeout_at", ptTimeout, "origin", ptOrigin, "id", ptID)
-			if err := h.onPromiseTimeout(ptOrigin, ptID, ptTimeout, yield); err != nil {
+			slog.Debug("timeout.process", "kind", "promise", "shard", shard, "bucket", b, "timeout_at", ptTimeout, "id", ptID)
+			if err := h.onPromiseTimeout(originFromID(ptID), ptID, ptTimeout, yield); err != nil {
 				slog.Error("TickPromiseTimeoutsAt: onPromiseTimeout", "shard", shard, "id", ptID, "err", err)
 			}
 		}
@@ -100,7 +100,7 @@ func (h *Handler) TickPromiseTimeoutsAt(ctx context.Context, t int64, shard int1
 func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, yield func(string)) {
 	for _, b := range h.bucketsToScan(t) {
 		iter := h.Session.Query(
-			`SELECT timeout_at, timeout_type, task_id, origin, promise_timeout_at FROM task_timeouts
+			`SELECT timeout_at, timeout_type, task_id, promise_timeout_at FROM task_timeouts
 			 WHERE bucket = ? AND shard = ? AND timeout_at <= ?`,
 			b, shard, t,
 		).Iter()
@@ -108,9 +108,9 @@ func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, 
 
 		var ttTimeout int64
 		var ttType int8
-		var ttID, ttOrigin string
+		var ttID string
 		var ttPromiseTimeoutAt int64
-		for iter.Scan(&ttTimeout, &ttType, &ttID, &ttOrigin, &ttPromiseTimeoutAt) {
+		for iter.Scan(&ttTimeout, &ttType, &ttID, &ttPromiseTimeoutAt) {
 			yield(LabelTaskTimeoutScanRowTaskTimeouts)
 			select {
 			case <-ctx.Done():
@@ -118,17 +118,14 @@ func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, 
 				return
 			default:
 			}
-			if ttOrigin == "" {
-				ttOrigin = ttID
-			}
 			if ttType == 0 {
-				slog.Debug("timeout.process", "kind", "task_retry", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "origin", ttOrigin, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
-				if err := h.onTaskRetryTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
+				slog.Debug("timeout.process", "kind", "task_retry", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
+				if err := h.onTaskRetryTimeout(originFromID(ttID), ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
 					slog.Error("TickTaskTimeoutsAt: onTaskRetryTimeout", "shard", shard, "id", ttID, "err", err)
 				}
 			} else {
-				slog.Debug("timeout.process", "kind", "task_lease", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "origin", ttOrigin, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
-				if err := h.onTaskLeaseTimeout(ttOrigin, ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
+				slog.Debug("timeout.process", "kind", "task_lease", "shard", shard, "bucket", b, "timeout_at", ttTimeout, "id", ttID, "promise_timeout_at", ttPromiseTimeoutAt)
+				if err := h.onTaskLeaseTimeout(originFromID(ttID), ttID, ttTimeout, ttPromiseTimeoutAt, t, yield); err != nil {
 					slog.Error("TickTaskTimeoutsAt: onTaskLeaseTimeout", "shard", shard, "id", ttID, "err", err)
 				}
 			}
@@ -144,16 +141,16 @@ func (h *Handler) TickTaskTimeoutsAt(ctx context.Context, t int64, shard int16, 
 func (h *Handler) TickScheduleTimeoutsAt(ctx context.Context, t int64, shard int16, yield func(string)) {
 	for _, b := range h.bucketsToScan(t) {
 		iter := h.Session.Query(
-			`SELECT timeout_at, schedule_id, origin, create_token FROM schedule_timeouts
+			`SELECT timeout_at, schedule_id, create_token FROM schedule_timeouts
 			 WHERE bucket = ? AND shard = ? AND timeout_at <= ?`,
 			b, shard, t,
 		).Iter()
 		yield(LabelScheduleTimeoutScanScheduleTimeouts)
 
 		var stTimeout int64
-		var stID, stOrigin string
+		var stID string
 		var stToken gocql.UUID
-		for iter.Scan(&stTimeout, &stID, &stOrigin, &stToken) {
+		for iter.Scan(&stTimeout, &stID, &stToken) {
 			yield(LabelScheduleTimeoutScanRowScheduleTimeouts)
 			select {
 			case <-ctx.Done():
@@ -161,11 +158,8 @@ func (h *Handler) TickScheduleTimeoutsAt(ctx context.Context, t int64, shard int
 				return
 			default:
 			}
-			if stOrigin == "" {
-				stOrigin = stID
-			}
-			slog.Debug("timeout.process", "kind", "schedule", "shard", shard, "bucket", b, "timeout_at", stTimeout, "origin", stOrigin, "id", stID, "token", stToken)
-			if err := h.onScheduleTimeout(stOrigin, stID, stTimeout, stToken, t, yield); err != nil {
+			slog.Debug("timeout.process", "kind", "schedule", "shard", shard, "bucket", b, "timeout_at", stTimeout, "id", stID, "token", stToken)
+			if err := h.onScheduleTimeout(originFromID(stID), stID, stTimeout, stToken, t, yield); err != nil {
 				slog.Error("TickScheduleTimeoutsAt: onScheduleTimeout", "shard", shard, "id", stID, "err", err)
 			}
 		}
@@ -210,16 +204,15 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		var due []ptEntry
 
 		iter := h.Session.Query(
-			`SELECT timeout_at, promise_id, origin FROM promise_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
+			`SELECT timeout_at, promise_id FROM promise_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
 			t,
 		).Iter()
 		yield(LabelPromiseTimeoutScanPromiseTimeoutsDebug)
 		var ptTimeout int64
 		var ptID string
-		var ptOrigin string
-		for iter.Scan(&ptTimeout, &ptID, &ptOrigin) {
+		for iter.Scan(&ptTimeout, &ptID) {
 			yield(LabelPromiseTimeoutScanRowPromiseTimeoutsDebug)
-			due = append(due, ptEntry{ptTimeout, ptOrigin, ptID})
+			due = append(due, ptEntry{ptTimeout, originFromID(ptID), ptID})
 		}
 		if err := iter.Close(); err != nil {
 			slog.Error("debugTickAt: promise_timeouts scan", "err", err)
@@ -253,21 +246,17 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		var due []ttEntry
 
 		iter := h.Session.Query(
-			`SELECT timeout_at, timeout_type, task_id, origin, promise_timeout_at FROM task_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
+			`SELECT timeout_at, timeout_type, task_id, promise_timeout_at FROM task_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
 			t,
 		).Iter()
 		yield(LabelTaskTimeoutScanTaskTimeoutsDebug)
 		var ttTimeout int64
 		var ttType int8
 		var ttID string
-		var ttOrigin string
 		var ttPromiseTimeoutAt int64
-		for iter.Scan(&ttTimeout, &ttType, &ttID, &ttOrigin, &ttPromiseTimeoutAt) {
+		for iter.Scan(&ttTimeout, &ttType, &ttID, &ttPromiseTimeoutAt) {
 			yield(LabelTaskTimeoutScanRowTaskTimeoutsDebug)
-			if ttOrigin == "" {
-				ttOrigin = ttID
-			}
-			due = append(due, ttEntry{ttTimeout, ttType, ttID, ttOrigin, ttPromiseTimeoutAt})
+			due = append(due, ttEntry{ttTimeout, ttType, ttID, originFromID(ttID), ttPromiseTimeoutAt})
 		}
 		if err := iter.Close(); err != nil {
 			slog.Error("debugTickAt: task_timeouts scan", "err", err)
@@ -311,20 +300,16 @@ func (h *Handler) debugTickAt(t int64, yield func(string)) {
 		var due []schedEntry
 
 		iter := h.Session.Query(
-			`SELECT timeout_at, schedule_id, origin, create_token FROM schedule_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
+			`SELECT timeout_at, schedule_id, create_token FROM schedule_timeouts WHERE timeout_at <= ? ALLOW FILTERING`,
 			t,
 		).Iter()
 		yield(LabelScheduleTimeoutScanScheduleTimeoutsDebug)
 		var stTimeout int64
 		var stID string
-		var stOrigin string
 		var stToken gocql.UUID
-		for iter.Scan(&stTimeout, &stID, &stOrigin, &stToken) {
+		for iter.Scan(&stTimeout, &stID, &stToken) {
 			yield(LabelScheduleTimeoutScanRowScheduleTimeoutsDebug)
-			if stOrigin == "" {
-				stOrigin = stID
-			}
-			due = append(due, schedEntry{stTimeout, stID, stOrigin, stToken})
+			due = append(due, schedEntry{stTimeout, stID, originFromID(stID), stToken})
 		}
 		if err := iter.Close(); err != nil {
 			slog.Error("debugTickAt: schedule_timeouts scan", "err", err)
@@ -401,8 +386,8 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 		// Stale — explicitly delete promise_timeouts entry.
 		if delErr := h.Session.Query(
 			`DELETE FROM promise_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id,
 		).Exec(); delErr != nil {
 			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
@@ -416,8 +401,8 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 		// Already settled — delete promise_timeouts entry.
 		if delErr := h.Session.Query(
 			`DELETE FROM promise_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id,
 		).Exec(); delErr != nil {
 			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
@@ -428,8 +413,8 @@ func (h *Handler) onPromiseTimeout(origin string, id string, timeoutAt int64, yi
 		// Orphan — delete promise_timeouts entry.
 		if delErr := h.Session.Query(
 			`DELETE FROM promise_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+			h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id,
 		).Exec(); delErr != nil {
 			slog.Warn("onPromiseTimeout: delete promise_timeouts", "id", id, "err", delErr)
 		}
@@ -481,6 +466,7 @@ func (h *Handler) enqueueResume(
 ) ([]resumeAwaiter, settledData, error) {
 	type awaiterInfo struct {
 		id          string
+		origin      string
 		state       string
 		timeoutAt   int64
 		taskState   string
@@ -505,7 +491,7 @@ func (h *Handler) enqueueResume(
 		err := h.Session.Query(
 			`SELECT state, timeout_at, task_state, task_version, target
 			 FROM promises WHERE origin = ? AND id = ?`,
-			origin, cbID,
+			originFromID(cbID), cbID,
 		).Scan(&aState, &aTimeoutAt, &aTaskState, &aTaskVersion, &aTarget)
 		yield(LabelEnqueueResumeReadAwaiters)
 		if err == gocql.ErrNotFound {
@@ -516,6 +502,7 @@ func (h *Handler) enqueueResume(
 		}
 		awaiters = append(awaiters, awaiterInfo{
 			id:          cbID,
+			origin:      originFromID(cbID),
 			state:       aState,
 			timeoutAt:   aTimeoutAt,
 			taskState:   aTaskState,
@@ -531,8 +518,8 @@ func (h *Handler) enqueueResume(
 	rollback := func() {
 		for _, p := range preinserts {
 			if err := h.Session.Query(
-				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(p.retryAt), h.shardFor(p.awaiterID), p.retryAt, origin, p.awaiterID,
+				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(p.retryAt), h.shardFor(p.awaiterID), p.retryAt, p.awaiterID,
 			).Exec(); err != nil {
 				slog.Error("enqueueResume: rollback task_timeouts", "id", p.awaiterID, "err", err)
 			}
@@ -546,8 +533,8 @@ func (h *Handler) enqueueResume(
 		}
 		retryAt := now + RetryTimeout
 		if err := h.Session.Query(
-			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-			h.BucketFor(retryAt), h.shardFor(a.id), retryAt, a.id, origin, a.timeoutAt,
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+			h.BucketFor(retryAt), h.shardFor(a.id), retryAt, a.id, a.timeoutAt,
 		).Exec(); err != nil {
 			rollback()
 			return nil, settledData{}, err
@@ -574,7 +561,7 @@ func (h *Handler) enqueueResume(
 				`UPDATE promises SET task_state = 'pending', task_resumes = ?, task_timeout_retry = ?
 				 WHERE origin = ? AND id = ?
 				 IF task_state = 'suspended'`,
-				[]string{settledID}, retryAt, origin, a.id,
+				[]string{settledID}, retryAt, a.origin, a.id,
 			)
 
 		case "halted":
@@ -582,7 +569,7 @@ func (h *Handler) enqueueResume(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
 				 IF task_state = 'halted'`,
-				[]string{settledID}, origin, a.id,
+				[]string{settledID}, a.origin, a.id,
 			)
 
 		case "pending":
@@ -590,7 +577,7 @@ func (h *Handler) enqueueResume(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
 				 IF task_state = 'pending'`,
-				[]string{settledID}, origin, a.id,
+				[]string{settledID}, a.origin, a.id,
 			)
 
 		case "acquired":
@@ -598,7 +585,7 @@ func (h *Handler) enqueueResume(
 				`UPDATE promises SET task_resumes = task_resumes + ?
 				 WHERE origin = ? AND id = ?
 				 IF task_state = 'acquired'`,
-				[]string{settledID}, origin, a.id,
+				[]string{settledID}, a.origin, a.id,
 			)
 		}
 	}
@@ -705,14 +692,14 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 	}
 
 	for _, a := range awaiters {
-		h.sendExecute(in.Origin, a.target, a.id, a.taskVersion)
+		h.sendExecute(a.target, a.id, a.taskVersion)
 	}
 	if awaiters != nil {
 		h.sendUnblock(in.Listeners, unblockRec)
 		// Async cleanup on win.
 		if delErr := h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(in.TimeoutAt), h.shardFor(in.ID), in.TimeoutAt, in.Origin, in.ID,
+			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+			h.BucketFor(in.TimeoutAt), h.shardFor(in.ID), in.TimeoutAt, in.ID,
 		).Exec(); delErr != nil {
 			slog.Warn("tryTimeout: delete promise_timeouts", "id", in.ID, "err", delErr)
 		}
@@ -720,8 +707,8 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 		if in.Target != "" {
 			if in.TaskTRetry != nil {
 				if delErr := h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*in.TaskTRetry), h.shardFor(in.ID), *in.TaskTRetry, in.Origin, in.ID,
+					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+					h.BucketFor(*in.TaskTRetry), h.shardFor(in.ID), *in.TaskTRetry, in.ID,
 				).Exec(); delErr != nil {
 					slog.Warn("tryTimeout: delete retry timeout", "id", in.ID, "err", delErr)
 				}
@@ -729,8 +716,8 @@ func (h *Handler) tryTimeout(in promiseTimeoutInput, now int64, yield func(strin
 			}
 			if in.TaskTLease != nil {
 				if delErr := h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*in.TaskTLease), h.shardFor(in.ID), *in.TaskTLease, in.Origin, in.ID,
+					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+					h.BucketFor(*in.TaskTLease), h.shardFor(in.ID), *in.TaskTLease, in.ID,
 				).Exec(); delErr != nil {
 					slog.Warn("tryTimeout: delete lease timeout", "id", in.ID, "err", delErr)
 				}
@@ -758,8 +745,8 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 		if err == nil {
 			if delErr := h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id,
 			).Exec(); delErr != nil {
 				slog.Warn("onTaskRetryTimeout: delete old timeout", "id", id, "err", delErr)
 			}
@@ -809,8 +796,8 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 
 	retryAt := now + RetryTimeout
 	if err = h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, promiseTAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, promiseTAt,
 	).Exec(); err != nil {
 		return err
 	}
@@ -831,8 +818,8 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 	if !applied {
 		if delErr := h.Session.Query(
 			`DELETE FROM task_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-			h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+			h.BucketFor(retryAt), h.shardFor(id), retryAt, id,
 		).Exec(); delErr != nil {
 			slog.Error("onTaskRetryTimeout: rollback new timeout", "id", id, "err", delErr)
 		}
@@ -840,7 +827,7 @@ func (h *Handler) onTaskRetryTimeout(origin string, id string, timeoutAt int64, 
 		return nil
 	}
 
-	h.sendExecute(origin, target, id, taskVersion)
+	h.sendExecute(target, id, taskVersion)
 	return nil
 }
 
@@ -860,8 +847,8 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 		if err == nil {
 			if delErr := h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+				h.BucketFor(timeoutAt), h.shardFor(id), timeoutAt, id,
 			).Exec(); delErr != nil {
 				slog.Warn("onTaskLeaseTimeout: delete lease timeout", "id", id, "err", delErr)
 			}
@@ -897,8 +884,8 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 	// Pre-insert retry timeout before the LWT so a kill between the two leaves an
 	// orphan entry rather than a pending task with no retry timeout.
 	if err = h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, promiseTAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, promiseTAt,
 	).Exec(); err != nil {
 		return err
 	}
@@ -925,8 +912,8 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 	if !applied {
 		if delErr := h.Session.Query(
 			`DELETE FROM task_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-			h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+			h.BucketFor(retryAt), h.shardFor(id), retryAt, id,
 		).Exec(); delErr != nil {
 			slog.Error("onTaskLeaseTimeout: rollback retry timeout", "id", id, "err", delErr)
 		}
@@ -935,7 +922,7 @@ func (h *Handler) onTaskLeaseTimeout(origin string, id string, timeoutAt int64, 
 	}
 
 	// Lease entry cleaned up by defer. Retry timeout was pre-inserted above.
-	h.sendExecute(origin, target, id, taskVersion)
+	h.sendExecute(target, id, taskVersion)
 	return nil
 }
 
@@ -967,16 +954,15 @@ func (h *Handler) sendUnblock(listeners []string, rec PromiseRecord) {
 // sendExecute dispatches an execute message for the given task. The Recorder
 // (when installed via the debug Dispatcher) coalesces duplicate executes for
 // the same task_id at snap time.
-func (h *Handler) sendExecute(origin, target, taskID string, version int) {
+func (h *Handler) sendExecute(target, taskID string, version int) {
 	if target == "" {
 		return
 	}
 	msg := ExecuteMsg{
 		Kind: "execute",
 		Data: struct {
-			Task   TaskRef `json:"task"`
-			Origin string  `json:"origin"`
-		}{Task: TaskRef{ID: taskID, Version: version}, Origin: origin},
+			Task TaskRef `json:"task"`
+		}{Task: TaskRef{ID: taskID, Version: version}},
 	}
 	b, err := json.Marshal(msg)
 	if err != nil {

@@ -28,7 +28,6 @@ type PromiseRecord struct {
 	TimeoutAt int64             `json:"timeoutAt"`
 	CreatedAt int64             `json:"createdAt"`
 	SettledAt *int64            `json:"settledAt,omitempty"`
-	Origin    *string           `json:"origin,omitempty"`
 }
 
 type TaskRecord struct {
@@ -38,7 +37,6 @@ type TaskRecord struct {
 	Resumes json.RawMessage `json:"resumes"` // []string | int | bool
 	TTL     *int            `json:"ttl,omitempty"`
 	PID     string          `json:"pid,omitempty"`
-	Origin  *string         `json:"origin,omitempty"`
 }
 
 type ScheduleRecord struct {
@@ -51,7 +49,6 @@ type ScheduleRecord struct {
 	CreatedAt      int64             `json:"createdAt"`
 	NextRunAt      int64             `json:"nextRunAt"`
 	LastRunAt      *int64            `json:"lastRunAt,omitempty"`
-	Origin         *string           `json:"origin,omitempty"`
 	Token          string            `json:"-"`
 }
 
@@ -67,8 +64,7 @@ type ExecuteMsg struct {
 	Kind string      `json:"kind"` // "execute"
 	Head MessageHead `json:"head"`
 	Data struct {
-		Task   TaskRef `json:"task"`
-		Origin string  `json:"origin"`
+		Task TaskRef `json:"task"`
 	} `json:"data"`
 }
 
@@ -88,7 +84,6 @@ type RequestHead struct {
 	Auth      string `json:"auth,omitempty"`
 	CorrID    string `json:"corrId"`
 	Version   string `json:"version"`
-	Origin    string `json:"resonate:origin,omitempty"`
 	DebugTime *int64 `json:"resonate:debug_time,omitempty"`
 }
 
@@ -111,28 +106,24 @@ type TaskRef struct {
 // TimeoutEntry appears in promise_timeouts and schedule_timeouts snap data.
 type TimeoutEntry struct {
 	ID      string `json:"id"`
-	Origin  string `json:"origin,omitempty"`
 	Timeout int64  `json:"timeout"`
 }
 
 // CallbackEntry appears in callbacks snap data.
 type CallbackEntry struct {
-	Awaiter string  `json:"awaiter"`
-	Awaited string  `json:"awaited"`
-	Origin  *string `json:"origin,omitempty"`
+	Awaiter string `json:"awaiter"`
+	Awaited string `json:"awaited"`
 }
 
 // ListenerEntry appears in listeners snap data.
 type ListenerEntry struct {
-	ID      string  `json:"id"`
-	Address string  `json:"address"`
-	Origin  *string `json:"origin,omitempty"`
+	ID      string `json:"id"`
+	Address string `json:"address"`
 }
 
 // TaskTimeoutEntry appears in task_timeouts snap data.
 type TaskTimeoutEntry struct {
 	ID      string `json:"id"`
-	Origin  string `json:"origin,omitempty"`
 	Type    int    `json:"type"`
 	Timeout int64  `json:"timeout"`
 }

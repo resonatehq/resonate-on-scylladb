@@ -198,26 +198,43 @@ func promisesConfig() string {
 	return strconv.Itoa(n)
 }
 
-// pickPromisePool derives the promise-ID pool for the given seed. The pool
-// size is the scope axis of the fuzz tests — smaller pools concentrate
-// contention on fewer rows, larger pools spread it out.
+// pickPromisePool derives the promise-ID pool for the given seed. IDs use
+// dot-structured naming (e.g. "a", "a.0", "b", "b.0", "b.1") so multiple IDs
+// can share an origin, enabling cross-origin validation paths (callbacks,
+// task.suspend) to be exercised by the diff tests.
 //
-// If RESONATE_TEST_PROMISES is set, that value fixes the pool size for every
-// seed (useful for bug-hunting at a specific scope). Otherwise the size is
-// pseudo-randomly drawn from [1, 10] using a seed-derived RNG, so every fuzz
-// run naturally sweeps the contention spectrum and replay reproduces the
-// same pool deterministically (same seed → same pool size).
-//
-// The pool is always p-0..p-(N-1).
+// If RESONATE_TEST_PROMISES is set, that value fixes the total pool size for
+// every seed. Otherwise the size is pseudo-randomly drawn from [1, 10]. In
+// either case the number of origins (1-3) is drawn from the seeded RNG so the
+// same seed → same pool.
 func pickPromisePool(seed int64) []string {
+	r := newRng(seed)
 	n := envInt("RESONATE_TEST_PROMISES", 0)
 	if n == 0 {
-		r := newRng(seed)
 		n = 1 + r.choice(10)
 	}
-	out := make([]string, n)
-	for i := range out {
-		out[i] = fmt.Sprintf("p-%d", i)
+
+	maxOrigins := n
+	if maxOrigins > 3 {
+		maxOrigins = 3
+	}
+	numOrigins := 1 + r.choice(maxOrigins) // 1..min(n,3)
+
+	roots := []string{"a", "b", "c"}
+	counts := make([]int, numOrigins)
+	for i := range counts {
+		counts[i] = 1
+	}
+	for i := 0; i < n-numOrigins; i++ {
+		counts[i%numOrigins]++
+	}
+
+	var out []string
+	for i := 0; i < numOrigins; i++ {
+		out = append(out, roots[i])
+		for j := 0; j < counts[i]-1; j++ {
+			out = append(out, fmt.Sprintf("%s.%d", roots[i], j))
+		}
 	}
 	return out
 }

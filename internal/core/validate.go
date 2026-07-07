@@ -10,20 +10,13 @@ import (
 // Origin resolution
 // =============================================================================
 
-// resolveOrigin determines the partition key origin for a promise/task lookup.
-// Priority: head > tag > id. Returns an error if head and tag are both present
-// but disagree.
-func resolveOrigin(headOrigin, tagOrigin, id string) (string, error) {
-	switch {
-	case headOrigin != "" && tagOrigin != "" && headOrigin != tagOrigin:
-		return "", fmt.Errorf("resonate:origin mismatch: head=%q tag=%q", headOrigin, tagOrigin)
-	case headOrigin != "":
-		return headOrigin, nil
-	case tagOrigin != "":
-		return tagOrigin, nil
-	default:
-		return id, nil
+// originFromID returns the partition-key origin for an id: the substring
+// before the first '.' separator, or the full id when no '.' is present.
+func originFromID(id string) string {
+	if i := strings.IndexByte(id, '.'); i >= 0 {
+		return id[:i]
 	}
+	return id
 }
 
 // =============================================================================
@@ -72,6 +65,32 @@ func (d *PromiseCreateData) Validate() error {
 	if d.Tags == nil {
 		return fmt.Errorf("tags is required")
 	}
+	// Rule 4
+	if prefix := d.Tags["resonate:prefix"]; strings.Contains(prefix, ".") {
+		return fmt.Errorf("resonate:prefix must not contain '.'")
+	}
+	// Rule 5
+	if origin := d.Tags["resonate:origin"]; strings.Contains(origin, ".") {
+		return fmt.Errorf("resonate:origin must not contain '.'")
+	}
+	// Rule 1
+	if origin := d.Tags["resonate:origin"]; origin != "" {
+		if *d.ID != origin && !strings.HasPrefix(*d.ID, origin+".") {
+			return fmt.Errorf("id must be prefixed by resonate:origin")
+		}
+	}
+	// Rule 2
+	if branch := d.Tags["resonate:branch"]; branch != "" {
+		if *d.ID != branch && !strings.HasPrefix(*d.ID, branch+".") {
+			return fmt.Errorf("id must be prefixed by resonate:branch")
+		}
+	}
+	// Rule 3
+	if parent := d.Tags["resonate:parent"]; parent != "" {
+		if *d.ID != parent && !strings.HasPrefix(*d.ID, parent+".") {
+			return fmt.Errorf("id must be prefixed by resonate:parent")
+		}
+	}
 	return nil
 }
 
@@ -96,6 +115,9 @@ func (d *PromiseRegisterCallbackData) Validate() error {
 	}
 	if d.Awaiter == "" {
 		return fmt.Errorf("awaiter is required")
+	}
+	if originFromID(d.Awaiter) != originFromID(d.Awaited) {
+		return fmt.Errorf("awaiter and awaited must belong to the same origin")
 	}
 	return nil
 }
@@ -233,6 +255,17 @@ func (d *TaskHeartbeatData) Validate() error {
 	if d.Tasks == nil {
 		return fmt.Errorf("tasks is required")
 	}
+	if len(d.Tasks) == 0 {
+		return fmt.Errorf("tasks must not be empty")
+	}
+	if len(d.Tasks) > 1 {
+		first := originFromID(d.Tasks[0].ID)
+		for _, t := range d.Tasks[1:] {
+			if originFromID(t.ID) != first {
+				return fmt.Errorf("all tasks must belong to the same origin")
+			}
+		}
+	}
 	return nil
 }
 
@@ -267,6 +300,9 @@ func (d *ScheduleCreateData) Validate() error {
 	}
 	if err := validateID(*d.ID); err != nil {
 		return err
+	}
+	if strings.Contains(*d.ID, ".") {
+		return fmt.Errorf("schedule id must not contain '.'")
 	}
 	if d.PromiseID == nil {
 		return fmt.Errorf("promiseId is required")

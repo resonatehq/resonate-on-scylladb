@@ -19,7 +19,7 @@ import (
 //   - Otherwise return task columns as-is.
 func (h *Handler) TaskGet(head RequestHead, req TaskGetData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
 	if err == gocql.ErrNotFound {
@@ -74,14 +74,7 @@ func (h *Handler) TaskGet(head RequestHead, req TaskGetData, now int64, yield fu
 func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yield func(string)) any {
 	inner := req.Action.Data
 	id := *inner.ID
-	origin, err := resolveOrigin(req.Action.Head.Origin, inner.Tags["resonate:origin"], id)
-	if err != nil {
-		return Res[string]{
-			Kind: "task.create",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
-			Data: err.Error(),
-		}
-	}
+	origin := originFromID(id)
 	target := inner.Tags["resonate:target"]
 
 	tags := inner.Tags
@@ -135,8 +128,8 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 	// or acquired task with no corresponding timeout entries.
 	if state == "pending" {
 		if err := h.Session.Query(
-			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
-			h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, id, origin,
+			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
+			h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, id,
 		).Exec(); err != nil {
 			slog.Error("task.create: pre-insert promise_timeouts", "id", id, "err", err)
 			return Res[string]{
@@ -148,8 +141,8 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 		yield(LabelTaskCreatePreinsertPromiseTimeouts)
 		if taskLease != nil {
 			if err := h.Session.Query(
-				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
-				h.BucketFor(*taskLease), h.shardFor(id), *taskLease, id, origin, *inner.TimeoutAt,
+				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?)`,
+				h.BucketFor(*taskLease), h.shardFor(id), *taskLease, id, *inner.TimeoutAt,
 			).Exec(); err != nil {
 				slog.Error("task.create: pre-insert task_timeouts lease", "id", id, "err", err)
 				return Res[string]{
@@ -212,10 +205,12 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 		if state == "pending" {
 			existingState, _ := row["state"].(string)
 			existingTimeoutAt, _ := row["timeout_at"].(int64)
-			if !(existingState == "pending" && existingTimeoutAt == *inner.TimeoutAt) {
+			existingTarget, _ := row["target"].(string)
+			existingHasTask := existingTarget != ""
+			if !existingHasTask || !(existingState == "pending" && existingTimeoutAt == *inner.TimeoutAt) {
 				h.Session.Query(
-					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-					h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, origin, id,
+					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+					h.BucketFor(*inner.TimeoutAt), h.shardFor(id), *inner.TimeoutAt, id,
 				).Exec()
 				yield(LabelTaskCreateRollbackPromiseTimeouts)
 			}
@@ -225,8 +220,8 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 				if !(existingTaskState == "acquired" && existingLeaseAt == *taskLease) {
 					h.Session.Query(
 						`DELETE FROM task_timeouts
-						 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-						h.BucketFor(*taskLease), h.shardFor(id), *taskLease, origin, id,
+						 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+						h.BucketFor(*taskLease), h.shardFor(id), *taskLease, id,
 					).Exec()
 					yield(LabelTaskCreateRollbackTaskTimeoutsLease)
 				}
@@ -455,7 +450,7 @@ func (h *Handler) taskCreateConflict(
 //   - On success: swap retry timeout → lease timeout; return task + promise.
 func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read full row (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -507,8 +502,8 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 	// Pre-insert lease timeout before the LWT so a kill between the two leaves an
 	// orphan type=1 entry rather than an acquired task with no lease timeout.
 	if err := h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
-		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, origin, row.Promise.TimeoutAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?)`,
+		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
 		slog.Error("task.acquire: pre-insert lease timeout", "id", id, "err", err)
 		return Res[string]{
@@ -553,8 +548,8 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 		if !(existingTaskState == "acquired" && existingLeaseAt == leaseAt) {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-				h.BucketFor(leaseAt), h.shardFor(id), leaseAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+				h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id,
 			).Exec()
 			yield(LabelTaskAcquireRollbackTaskTimeoutsLease)
 		}
@@ -576,8 +571,8 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 	if row.TaskTRetry != nil {
 		h.Session.Query(
 			`DELETE FROM task_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-			h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+			h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, id,
 		).Exec()
 		yield(LabelTaskAcquireCleanupTaskTimeoutsRetry)
 	}
@@ -618,7 +613,7 @@ func (h *Handler) TaskAcquire(head RequestHead, req TaskAcquireData, now int64, 
 //   - On success: swap lease timeout → retry timeout; send execute message.
 func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read row (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -660,8 +655,8 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 	// Pre-insert retry timeout before the LWT so a kill between the two leaves an
 	// orphan type=0 entry rather than a pending task with no retry timeout.
 	if err := h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, row.Promise.TimeoutAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
 		slog.Error("task.release: pre-insert retry timeout", "id", id, "err", err)
 		return Res[string]{
@@ -709,8 +704,8 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 		if existingRetryAt != retryAt {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(id), retryAt, id,
 			).Exec()
 			yield(LabelTaskReleaseRollbackTaskTimeoutsRetry)
 		}
@@ -732,8 +727,8 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 	if row.TaskTLease != nil {
 		if delErr := h.Session.Query(
 			`DELETE FROM task_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 		).Exec(); delErr != nil {
 			slog.Warn("task.release: delete lease timeout", "id", id, "err", delErr)
 		}
@@ -741,7 +736,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 	}
 
 	// Send execute message so another worker can pick up the task.
-	h.sendExecute(origin, row.Target, id, *req.Version)
+	h.sendExecute(row.Target, id, *req.Version)
 
 	return Res[struct{}]{
 		Kind: "task.release",
@@ -763,7 +758,7 @@ func (h *Handler) TaskRelease(head RequestHead, req TaskReleaseData, now int64, 
 //   - Dispatch inner action (promise.create or promise.settle) and return wrapped result.
 func (h *Handler) TaskFence(head RequestHead, req TaskFenceData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Decode and validate inner action (input-only, no DB needed).
 	var innerEnv struct {
@@ -936,7 +931,7 @@ func (h *Handler) TaskFence(head RequestHead, req TaskFenceData, now int64, yiel
 func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int64, yield func(string)) any {
 	for _, ref := range req.Tasks {
 		id := ref.ID
-		origin, _ := resolveOrigin(head.Origin, "", id)
+		origin := originFromID(id)
 
 		// 1. Read row (may eagerly timeout).
 		row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -970,9 +965,9 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 		// Pre-insert new lease timeout before the LWT so a kill between the two
 		// leaves an orphan entry rather than an acquired task with no lease timeout.
 		if err := h.Session.Query(
-			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at)
-			 VALUES (?, ?, ?, 1, ?, ?, ?)`,
-			h.BucketFor(newLease), h.shardFor(id), newLease, id, origin, row.Promise.TimeoutAt,
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at)
+			 VALUES (?, ?, ?, 1, ?, ?)`,
+			h.BucketFor(newLease), h.shardFor(id), newLease, id, row.Promise.TimeoutAt,
 		).Exec(); err != nil {
 			slog.Error("task.heartbeat: pre-insert lease timeout", "id", id, "err", err)
 			return Res[string]{
@@ -1007,8 +1002,8 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 			if row.TaskTLease != nil && *row.TaskTLease != newLease {
 				h.Session.Query(
 					`DELETE FROM task_timeouts
-					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+					h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 				).Exec()
 				yield(LabelTaskHeartbeatCleanupTaskTimeoutsLease)
 			}
@@ -1018,8 +1013,8 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 			if existingLeaseAt != newLease {
 				h.Session.Query(
 					`DELETE FROM task_timeouts
-					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(newLease), h.shardFor(id), newLease, origin, id,
+					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+					h.BucketFor(newLease), h.shardFor(id), newLease, id,
 				).Exec()
 				yield(LabelTaskHeartbeatRollbackTaskTimeoutsLease)
 			}
@@ -1048,7 +1043,7 @@ func (h *Handler) TaskHeartbeat(head RequestHead, req TaskHeartbeatData, now int
 //     callbacks on all awaited promises; delete lease timeout; return 200 {}.
 func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// Validate request before any DB work (spec schema refinements).
 	if len(req.Actions) == 0 {
@@ -1071,6 +1066,13 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 				Kind: "task.suspend",
 				Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
 				Data: "Action awaited promise must not equal the task ID",
+			}
+		}
+		if originFromID(action.Data.Awaited) != origin {
+			return Res[string]{
+				Kind: "task.suspend",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
+				Data: "All action awaited IDs must belong to the same origin as the task",
 			}
 		}
 	}
@@ -1275,8 +1277,8 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 	if row.TaskTLease != nil {
 		if err := h.Session.Query(
 			`DELETE FROM task_timeouts
-			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+			 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 		).Exec(); err != nil {
 			slog.Warn("task.suspend: delete lease timeout", "id", id, "err", err)
 		}
@@ -1307,7 +1309,7 @@ func (h *Handler) TaskSuspend(head RequestHead, req TaskSuspendData, now int64, 
 //   - Return 200 {promise}.
 func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read full row (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -1407,20 +1409,20 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 		}
 	}
 	for _, a := range awaiters {
-		h.sendExecute(origin, a.target, a.id, a.taskVersion)
+		h.sendExecute(a.target, a.id, a.taskVersion)
 	}
 	h.sendUnblock(row.Listeners, unblockRec)
 
 	// 8. Cleanup (best-effort, only on success).
 	h.Session.Query(
-		`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-		h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
+		`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+		h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, id,
 	).Exec()
 	yield(LabelTaskFulfillCleanupPromiseTimeouts)
 	if row.TaskTLease != nil {
 		h.Session.Query(
-			`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+			`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+			h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 		).Exec()
 		yield(LabelTaskFulfillCleanupTaskTimeoutsLease)
 	}
@@ -1460,7 +1462,7 @@ func (h *Handler) TaskFulfill(head RequestHead, req TaskFulfillData, now int64, 
 //   - On LWT failure (concurrent modification): 409 "Concurrent modification; please retry".
 func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read row (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -1555,8 +1557,8 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 		if row.TaskTLease != nil {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-				h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+				h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 			).Exec()
 			yield(LabelTaskHaltCleanupTaskTimeoutsLease)
 		}
@@ -1564,8 +1566,8 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 		if row.TaskTRetry != nil {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, id,
 			).Exec()
 			yield(LabelTaskHaltCleanupTaskTimeoutsRetry)
 		}
@@ -1591,7 +1593,7 @@ func (h *Handler) TaskHalt(head RequestHead, req TaskHaltData, now int64, yield 
 //   - Return 200 {} or 404/409.
 func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read row (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -1624,8 +1626,8 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 	// Pre-insert retry timeout before the LWT so a kill between the two leaves an
 	// orphan type=0 entry rather than a pending task with no retry timeout.
 	if err := h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, origin, row.Promise.TimeoutAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+		h.BucketFor(retryAt), h.shardFor(id), retryAt, id, row.Promise.TimeoutAt,
 	).Exec(); err != nil {
 		slog.Error("task.continue: pre-insert retry timeout", "id", id, "err", err)
 		return Res[string]{
@@ -1665,8 +1667,8 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 		if row.TaskTRetry == nil || *row.TaskTRetry != retryAt {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(id), retryAt, id,
 			).Exec()
 			yield(LabelTaskContinueRollbackTaskTimeoutsRetry)
 		}
@@ -1678,7 +1680,7 @@ func (h *Handler) TaskContinue(head RequestHead, req TaskContinueData, now int64
 	}
 
 	// 3. Auxiliary: send execute message. Retry timeout was pre-inserted above.
-	h.sendExecute(origin, row.Target, id, row.Task.Version)
+	h.sendExecute(row.Target, id, row.Task.Version)
 
 	return Res[struct{}]{
 		Kind: "task.continue",
@@ -1706,8 +1708,8 @@ func (h *Handler) taskCreateReacquire(
 	// Pre-insert lease timeout before the LWT so a kill between the two leaves an
 	// orphan type=1 entry rather than an acquired task with no lease timeout.
 	if err := h.Session.Query(
-		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
-		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, origin, existingTimeoutAt,
+		`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 1, ?, ?)`,
+		h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id, existingTimeoutAt,
 	).Exec(); err != nil {
 		slog.Error("task.create re-acquire: pre-insert lease timeout", "id", id, "err", err)
 		return Res[string]{
@@ -1750,8 +1752,8 @@ func (h *Handler) taskCreateReacquire(
 		if existingLeaseAt != leaseAt {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-				h.BucketFor(leaseAt), h.shardFor(id), leaseAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+				h.BucketFor(leaseAt), h.shardFor(id), leaseAt, id,
 			).Exec()
 			yield(LabelTaskCreateRollbackTaskTimeoutsLease)
 		}
@@ -1767,8 +1769,8 @@ func (h *Handler) taskCreateReacquire(
 		if retryAt, ok := retryRaw.(int64); ok {
 			h.Session.Query(
 				`DELETE FROM task_timeouts
-				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(id), retryAt, origin, id,
+				 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(id), retryAt, id,
 			).Exec()
 			yield(LabelTaskCreateCleanupTaskTimeoutsRetry)
 		}

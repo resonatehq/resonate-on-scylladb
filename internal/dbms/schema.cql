@@ -49,9 +49,8 @@ CREATE TABLE IF NOT EXISTS promise_timeouts (
     bucket     BIGINT,
     shard      SMALLINT,
     timeout_at BIGINT,
-    origin     TEXT,
     promise_id TEXT,
-    PRIMARY KEY ((bucket, shard), timeout_at, origin, promise_id)
+    PRIMARY KEY ((bucket, shard), timeout_at, promise_id)
 ) WITH CLUSTERING ORDER BY (timeout_at ASC);
 
 CREATE TABLE IF NOT EXISTS task_timeouts (
@@ -59,20 +58,18 @@ CREATE TABLE IF NOT EXISTS task_timeouts (
     shard              SMALLINT,
     timeout_at         BIGINT,
     timeout_type       TINYINT,
-    origin             TEXT,
     task_id            TEXT,
     promise_timeout_at BIGINT,
-    PRIMARY KEY ((bucket, shard), timeout_at, timeout_type, origin, task_id)
+    PRIMARY KEY ((bucket, shard), timeout_at, timeout_type, task_id)
 ) WITH CLUSTERING ORDER BY (timeout_at ASC);
 
 CREATE TABLE IF NOT EXISTS schedule_timeouts (
     bucket       BIGINT,
     shard        SMALLINT,
     timeout_at   BIGINT,
-    origin       TEXT,
     schedule_id  TEXT,
     create_token UUID,
-    PRIMARY KEY ((bucket, shard), timeout_at, origin, schedule_id, create_token)
+    PRIMARY KEY ((bucket, shard), timeout_at, schedule_id, create_token)
 ) WITH CLUSTERING ORDER BY (timeout_at ASC);
 
 CREATE TABLE IF NOT EXISTS workers (

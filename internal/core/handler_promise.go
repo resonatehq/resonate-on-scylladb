@@ -16,7 +16,7 @@ import (
 
 func (h *Handler) PromiseGet(head RequestHead, req PromiseGetData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
 	if err == gocql.ErrNotFound {
@@ -241,13 +241,7 @@ func (h *Handler) readAndTryTimeout(
 
 func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int64, yield func(string)) Res[PromiseCreateResData] {
 	id := *req.ID
-	origin, err := resolveOrigin(head.Origin, req.Tags["resonate:origin"], id)
-	if err != nil {
-		return Res[PromiseCreateResData]{
-			Kind: "promise.create",
-			Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
-		}
-	}
+	origin := originFromID(id)
 	target := req.Tags["resonate:target"]
 	hasTask := target != ""
 
@@ -315,10 +309,10 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	// 2a. Pre-insert promise_timeouts (and task_timeouts for tasks) before the LWT so
 	// kills between here and the LWT leave orphan entries rather than a committed
 	// promise/task row with no corresponding timeout entry.
-	if state == "pending" {
+	if state == "pending" && hasTask {
 		if err := h.Session.Query(
-			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id, origin) VALUES (?, ?, ?, ?, ?)`,
-			h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id, origin,
+			`INSERT INTO promise_timeouts (bucket, shard, timeout_at, promise_id) VALUES (?, ?, ?, ?)`,
+			h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id,
 		).Exec(); err != nil {
 			slog.Error("promise.create: pre-insert promise_timeouts", "id", id, "err", err)
 			return Res[PromiseCreateResData]{
@@ -327,19 +321,17 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 			}
 		}
 		yield(LabelPromiseCreatePreinsertPromiseTimeouts)
-		if hasTask {
-			if err := h.Session.Query(
-				`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-				h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id, origin, *req.TimeoutAt,
-			).Exec(); err != nil {
-				slog.Error("promise.create: pre-insert task_timeouts", "id", id, "err", err)
-				return Res[PromiseCreateResData]{
-					Kind: "promise.create",
-					Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
-				}
+		if err := h.Session.Query(
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+			h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id, *req.TimeoutAt,
+		).Exec(); err != nil {
+			slog.Error("promise.create: pre-insert task_timeouts", "id", id, "err", err)
+			return Res[PromiseCreateResData]{
+				Kind: "promise.create",
+				Head: ResponseHead{CorrID: head.CorrID, Status: 500, Version: head.Version},
 			}
-			yield(LabelPromiseCreatePreinsertTaskTimeoutsRetry)
 		}
+		yield(LabelPromiseCreatePreinsertTaskTimeoutsRetry)
 	}
 
 	// 2b. LWT INSERT — task_timeout_retry is included atomically so that
@@ -406,25 +398,25 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 		// existing task is pending with the same retry deadline (task_timeouts
 		// type=0). Settled promises and non-pending tasks have no legitimate
 		// hint row, so any entry at that PK is the one we just pre-inserted.
-		if state == "pending" {
-			if !(existingState == "pending" && existingTimeoutAt == *req.TimeoutAt) {
+		if state == "pending" && hasTask {
+			existingTarget, _ := row["target"].(string)
+			existingHasTask := existingTarget != ""
+			if !existingHasTask || !(existingState == "pending" && existingTimeoutAt == *req.TimeoutAt) {
 				h.Session.Query(
-					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-					h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, origin, id,
+					`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+					h.BucketFor(*req.TimeoutAt), h.shardFor(id), *req.TimeoutAt, id,
 				).Exec()
 				yield(LabelPromiseCreateRollbackPromiseTimeouts)
 			}
-			if hasTask {
-				existingTaskState, _ := row["task_state"].(string)
-				existingRetryAt, _ := row["task_timeout_retry"].(int64)
-				if !(existingTaskState == "pending" && existingRetryAt == taskRetryAt) {
-					h.Session.Query(
-						`DELETE FROM task_timeouts
-						 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-						h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, origin, id,
-					).Exec()
-					yield(LabelPromiseCreateRollbackTaskTimeoutsRetry)
-				}
+			existingTaskState, _ := row["task_state"].(string)
+			existingRetryAt, _ := row["task_timeout_retry"].(int64)
+			if !(existingTaskState == "pending" && existingRetryAt == taskRetryAt) {
+				h.Session.Query(
+					`DELETE FROM task_timeouts
+					 WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+					h.BucketFor(taskRetryAt), h.shardFor(id), taskRetryAt, id,
+				).Exec()
+				yield(LabelPromiseCreateRollbackTaskTimeoutsRetry)
 			}
 		}
 
@@ -509,7 +501,7 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 	if state == "pending" && hasTask && taskRetryImmediate {
 		// Immediately dispatch execute so a worker can pick up the task without
 		// waiting for the retry timeout to fire.
-		h.sendExecute(origin, target, id, 0)
+		h.sendExecute(target, id, 0)
 	}
 
 	return Res[PromiseCreateResData]{
@@ -536,7 +528,8 @@ func (h *Handler) PromiseCreate(head RequestHead, req PromiseCreateData, now int
 func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterCallbackData, now int64, yield func(string)) any {
 	awaitedID := req.Awaited
 	awaiterID := req.Awaiter
-	origin, _ := resolveOrigin(head.Origin, "", awaitedID)
+	origin := originFromID(awaitedID)
+	awaiterOrigin := originFromID(awaiterID)
 
 	// Reject self-callbacks: schema refinement, returns 400.
 	if awaiterID == awaitedID {
@@ -566,7 +559,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 	}
 
 	// 2. Read awaiter promise (may eagerly timeout).
-	awaiterRow, err := h.readAndTryTimeout(awaiterID, origin, now, yield)
+	awaiterRow, err := h.readAndTryTimeout(awaiterID, awaiterOrigin, now, yield)
 	if err == gocql.ErrNotFound {
 		return Res[string]{
 			Kind: "promise.register_callback",
@@ -666,7 +659,7 @@ func (h *Handler) PromiseRegisterCallback(head RequestHead, req PromiseRegisterC
 
 func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterListenerData, now int64, yield func(string)) any {
 	awaitedID := req.Awaited
-	awaitedOrigin, _ := resolveOrigin(head.Origin, "", awaitedID)
+	awaitedOrigin := originFromID(awaitedID)
 	address := req.Address
 
 	// 1. Read awaited promise (may eagerly timeout).
@@ -744,7 +737,7 @@ func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterL
 
 func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int64, yield func(string)) any {
 	id := req.ID
-	origin, _ := resolveOrigin(head.Origin, "", id)
+	origin := originFromID(id)
 
 	// 1. Read current state (may eagerly timeout).
 	row, err := h.readAndTryTimeout(id, origin, now, yield)
@@ -834,28 +827,28 @@ func (h *Handler) PromiseSettle(head RequestHead, req PromiseSettleData, now int
 	if awaiters != nil {
 		// This call won the settle.
 		for _, a := range awaiters {
-			h.sendExecute(origin, a.target, a.id, a.taskVersion)
+			h.sendExecute(a.target, a.id, a.taskVersion)
 		}
 		h.sendUnblock(row.Listeners, unblockRec)
 
 		// 7. Cleanup (best-effort, only on success).
-		h.Session.Query(
-			`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND origin = ? AND promise_id = ?`,
-			h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, origin, id,
-		).Exec()
-		yield(LabelPromiseSettleCleanupPromiseTimeouts)
 		if row.Target != "" {
+			h.Session.Query(
+				`DELETE FROM promise_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND promise_id = ?`,
+				h.BucketFor(row.Promise.TimeoutAt), h.shardFor(id), row.Promise.TimeoutAt, id,
+			).Exec()
+			yield(LabelPromiseSettleCleanupPromiseTimeouts)
 			if row.TaskTRetry != nil {
 				h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, origin, id,
+					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+					h.BucketFor(*row.TaskTRetry), h.shardFor(id), *row.TaskTRetry, id,
 				).Exec()
 				yield(LabelPromiseSettleCleanupTaskTimeoutsRetry)
 			}
 			if row.TaskTLease != nil {
 				h.Session.Query(
-					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND origin = ? AND task_id = ?`,
-					h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, origin, id,
+					`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 1 AND task_id = ?`,
+					h.BucketFor(*row.TaskTLease), h.shardFor(id), *row.TaskTLease, id,
 				).Exec()
 				yield(LabelPromiseSettleCleanupTaskTimeoutsLease)
 			}
@@ -897,6 +890,7 @@ func (h *Handler) resumeCallbackAwaiter(
 	now int64,
 	yield func(string),
 ) error {
+	awaiterOrigin := originFromID(awaiterID)
 	switch taskState {
 	case "fulfilled":
 		// no statement
@@ -904,8 +898,8 @@ func (h *Handler) resumeCallbackAwaiter(
 	case "suspended":
 		retryAt := now + RetryTimeout
 		if err := h.Session.Query(
-			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, origin, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?, ?)`,
-			h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, awaiterID, origin, timeoutAt,
+			`INSERT INTO task_timeouts (bucket, shard, timeout_at, timeout_type, task_id, promise_timeout_at) VALUES (?, ?, ?, 0, ?, ?)`,
+			h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, awaiterID, timeoutAt,
 		).Exec(); err != nil {
 			return err
 		}
@@ -916,14 +910,14 @@ func (h *Handler) resumeCallbackAwaiter(
 			`UPDATE promises SET task_state = 'pending', task_resumes = ?, task_timeout_retry = ?
 			 WHERE origin = ? AND id = ?
 			 IF task_state = 'suspended'`,
-			[]string{awaitedID}, retryAt, origin, awaiterID,
+			[]string{awaitedID}, retryAt, awaiterOrigin, awaiterID,
 		).MapScanCAS(lwtRow)
 		yield(LabelPromiseRegisterCallbackResumeCommit)
 
 		if err != nil {
 			h.Session.Query(
-				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, origin, awaiterID,
+				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, awaiterID,
 			).Exec()
 			yield(LabelPromiseRegisterCallbackResumeRollback)
 			return err
@@ -931,13 +925,13 @@ func (h *Handler) resumeCallbackAwaiter(
 		if !applied {
 			// Awaiter moved on concurrently — preinsert is stale, clean it up.
 			h.Session.Query(
-				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND origin = ? AND task_id = ?`,
-				h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, origin, awaiterID,
+				`DELETE FROM task_timeouts WHERE bucket = ? AND shard = ? AND timeout_at = ? AND timeout_type = 0 AND task_id = ?`,
+				h.BucketFor(retryAt), h.shardFor(awaiterID), retryAt, awaiterID,
 			).Exec()
 			yield(LabelPromiseRegisterCallbackResumeRollback)
 			return fmt.Errorf("concurrent modification")
 		}
-		h.sendExecute(origin, target, awaiterID, taskVersion)
+		h.sendExecute(target, awaiterID, taskVersion)
 
 	case "pending", "acquired", "halted":
 		lwtRow := make(map[string]interface{})
@@ -945,7 +939,7 @@ func (h *Handler) resumeCallbackAwaiter(
 			`UPDATE promises SET task_resumes = task_resumes + ?
 			 WHERE origin = ? AND id = ?
 			 IF task_state = ?`,
-			[]string{awaitedID}, origin, awaiterID, taskState,
+			[]string{awaitedID}, awaiterOrigin, awaiterID, taskState,
 		).MapScanCAS(lwtRow)
 		yield(LabelPromiseRegisterCallbackResumeCommit)
 		if err != nil {

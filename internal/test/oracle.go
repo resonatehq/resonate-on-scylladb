@@ -14,17 +14,11 @@ const pendingRetryTTL = int64(30_000)
 
 // ─── Origin resolution ────────────────────────────────────────────────────────
 
-func resolveOrigin(headOrigin, tagOrigin, id string) (string, error) {
-	switch {
-	case headOrigin != "" && tagOrigin != "" && headOrigin != tagOrigin:
-		return "", fmt.Errorf("resonate:origin mismatch: head=%q tag=%q", headOrigin, tagOrigin)
-	case headOrigin != "":
-		return headOrigin, nil
-	case tagOrigin != "":
-		return tagOrigin, nil
-	default:
-		return id, nil
+func originFromID(id string) string {
+	if i := strings.IndexByte(id, '.'); i >= 0 {
+		return id[:i]
 	}
+	return id
 }
 
 // ─── Wire record types ────────────────────────────────────────────────────────
@@ -36,7 +30,6 @@ type Value struct {
 
 type PromiseRecord struct {
 	ID        string            `json:"id"`
-	Origin    *string           `json:"origin,omitempty"`
 	State     string            `json:"state"`
 	Param     Value             `json:"param"`
 	Value     Value             `json:"value"`
@@ -48,7 +41,6 @@ type PromiseRecord struct {
 
 type TaskRecord struct {
 	ID      string   `json:"id"`
-	Origin  *string  `json:"origin,omitempty"`
 	State   string   `json:"state"`
 	Version int      `json:"version"`
 	Resumes []string `json:"resumes"`
@@ -58,7 +50,6 @@ type TaskRecord struct {
 
 type ScheduleRecord struct {
 	ID             string            `json:"id"`
-	Origin         *string           `json:"origin,omitempty"`
 	Cron           string            `json:"cron"`
 	PromiseID      string            `json:"promiseId"`
 	PromiseTimeout int64             `json:"promiseTimeout"`
@@ -108,18 +99,15 @@ type Schedule struct {
 }
 
 type PTimeout struct {
-	Origin  string
 	ID      string
 	Timeout int64
 }
 type TTimeout struct {
-	Origin  string
 	ID      string
 	Type    int
 	Timeout int64
 }
 type STimeout struct {
-	Origin    string
 	ID        string
 	Timeout   int64
 	CreatedAt int64
@@ -128,27 +116,23 @@ type STimeout struct {
 // ─── Snap types ───────────────────────────────────────────────────────────────
 
 type CallbackEntry struct {
-	Awaiter string  `json:"awaiter"`
-	Awaited string  `json:"awaited"`
-	Origin  *string `json:"origin,omitempty"`
+	Awaiter string `json:"awaiter"`
+	Awaited string `json:"awaited"`
 }
 
 type ListenerEntry struct {
-	ID      string  `json:"id"`
-	Address string  `json:"address"`
-	Origin  *string `json:"origin,omitempty"`
+	ID      string `json:"id"`
+	Address string `json:"address"`
 }
 
 type TaskTimeoutEntry struct {
 	ID      string `json:"id"`
-	Origin  string `json:"origin,omitempty"`
 	Type    int    `json:"type"`
 	Timeout int64  `json:"timeout"`
 }
 
 type TimeoutEntry struct {
 	ID      string `json:"id"`
-	Origin  string `json:"origin,omitempty"`
 	Timeout int64  `json:"timeout"`
 }
 
@@ -348,7 +332,6 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decode envelope: %w", err)
 	}
 	kind := env.Kind
-	headOrigin, _ := env.Head["resonate:origin"].(string)
 
 	unmarshal := func(dst any) error {
 		return json.Unmarshal(env.Data, dst)
@@ -453,7 +436,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.promiseGet(now, origin, d.ID)
 
 	case "promise.create":
@@ -461,11 +444,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		tagOrigin := d.Tags["resonate:origin"]
-		origin, err := resolveOrigin(headOrigin, tagOrigin, d.ID)
-		if err != nil {
-			return s.respond(kind, 400, err.Error())
-		}
+		origin := originFromID(d.ID)
 		return s.promiseCreate(now, origin, d.ID, d.TimeoutAt, d.Param, d.Tags)
 
 	case "promise.settle":
@@ -473,7 +452,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.promiseSettle(now, origin, d.ID, d.State, d.Value)
 
 	case "promise.register_callback":
@@ -484,8 +463,11 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if d.Awaited == d.Awaiter {
 			return s.respond(kind, 400, "data: Awaited and awaiter must be different promises")
 		}
-		awaitedOrigin, _ := resolveOrigin(headOrigin, "", d.Awaited)
-		awaiterOrigin, _ := resolveOrigin(headOrigin, "", d.Awaiter)
+		if originFromID(d.Awaited) != originFromID(d.Awaiter) {
+			return s.respond(kind, 400, "awaiter and awaited must belong to the same origin")
+		}
+		awaitedOrigin := originFromID(d.Awaited)
+		awaiterOrigin := originFromID(d.Awaiter)
 		return s.promiseRegisterCallback(now, awaitedOrigin, d.Awaited, awaiterOrigin, d.Awaiter)
 
 	case "promise.register_listener":
@@ -493,7 +475,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		awaitedOrigin, _ := resolveOrigin(headOrigin, "", d.Awaited)
+		awaitedOrigin := originFromID(d.Awaited)
 		return s.promiseRegisterListener(now, awaitedOrigin, d.Awaited, d.Address)
 
 	case "promise.search":
@@ -504,7 +486,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.taskGet(now, origin, d.ID)
 
 	case "task.create":
@@ -512,13 +494,8 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		innerHeadOrigin, _ := d.Action.Head["resonate:origin"].(string)
 		a := d.Action.Data
-		innerTagOrigin := a.Tags["resonate:origin"]
-		promiseOrigin, err := resolveOrigin(innerHeadOrigin, innerTagOrigin, a.ID)
-		if err != nil {
-			return s.respond(kind, 400, err.Error())
-		}
+		promiseOrigin := originFromID(a.ID)
 		return s.taskCreate(now, d.PID, d.TTL, promiseOrigin, a.ID, a.TimeoutAt, a.Param, a.Tags)
 
 	case "task.acquire":
@@ -526,7 +503,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.taskAcquire(now, origin, d.ID, d.Version, d.PID, d.TTL)
 
 	case "task.release":
@@ -534,7 +511,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.taskRelease(now, origin, d.ID, d.Version)
 
 	case "task.suspend":
@@ -542,7 +519,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		taskOrigin, _ := resolveOrigin(headOrigin, "", d.ID)
+		taskOrigin := originFromID(d.ID)
 		var validationErrs []string
 		for i, a := range d.Actions {
 			if a.Data.Awaited == a.Data.Awaiter {
@@ -558,12 +535,14 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if len(validationErrs) > 0 {
 			return s.respond(kind, 400, strings.Join(validationErrs, "; "))
 		}
-		// Each action's awaited/awaiter origin is resolved from headOrigin.
+		for _, a := range d.Actions {
+			if originFromID(a.Data.Awaited) != taskOrigin {
+				return s.respond(kind, 400, "All action awaited IDs must belong to the same origin as the task")
+			}
+		}
 		pairs := make([][4]string, len(d.Actions))
 		for i, a := range d.Actions {
-			awaitedOrigin, _ := resolveOrigin(headOrigin, "", a.Data.Awaited)
-			awaiterOrigin, _ := resolveOrigin(headOrigin, "", a.Data.Awaiter)
-			pairs[i] = [4]string{awaitedOrigin, a.Data.Awaited, awaiterOrigin, a.Data.Awaiter}
+			pairs[i] = [4]string{taskOrigin, a.Data.Awaited, taskOrigin, a.Data.Awaiter}
 		}
 		return s.taskSuspend(now, taskOrigin, d.ID, d.Version, pairs)
 
@@ -572,9 +551,9 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		taskOrigin, _ := resolveOrigin(headOrigin, "", d.ID)
+		taskOrigin := originFromID(d.ID)
 		actionP := d.Action.Data
-		promiseOrigin, _ := resolveOrigin(headOrigin, "", actionP.ID)
+		promiseOrigin := originFromID(actionP.ID)
 		return s.taskFulfill(now, taskOrigin, d.ID, d.Version, promiseOrigin, actionP.ID, actionP.State, actionP.Value)
 
 	case "task.fence":
@@ -582,7 +561,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		taskOrigin, _ := resolveOrigin(headOrigin, "", d.ID)
+		taskOrigin := originFromID(d.ID)
 		return s.taskFence(now, taskOrigin, d.ID, d.Version, d.Action)
 
 	case "task.heartbeat":
@@ -592,7 +571,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		}
 		refs := make([][3]any, len(d.Tasks))
 		for i, t := range d.Tasks {
-			taskOrigin, _ := resolveOrigin(headOrigin, "", t.ID)
+			taskOrigin := originFromID(t.ID)
 			refs[i] = [3]any{taskOrigin, t.ID, t.Version}
 		}
 		return s.taskHeartbeat(now, d.PID, refs)
@@ -602,7 +581,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.taskHalt(now, origin, d.ID)
 
 	case "task.continue":
@@ -610,7 +589,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.taskContinue(now, origin, d.ID)
 
 	case "task.search":
@@ -621,7 +600,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.scheduleGet(origin, d.ID)
 
 	case "schedule.create":
@@ -629,7 +608,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.scheduleCreate(now, origin, d.ID, d.Cron, d.PromiseID, d.PromiseTimeout, d.PromiseParam, d.PromiseTags)
 
 	case "schedule.delete":
@@ -637,7 +616,7 @@ func (s *Server) Apply(now int64, raw []byte) ([]byte, error) {
 		if err := unmarshal(&d); err != nil {
 			return s.respond(kind, 400, err.Error())
 		}
-		origin, _ := resolveOrigin(headOrigin, "", d.ID)
+		origin := originFromID(d.ID)
 		return s.scheduleDelete(origin, d.ID)
 
 	case "schedule.search":
@@ -688,14 +667,35 @@ func (s *Server) promiseGet(now int64, origin, id string) ([]byte, error) {
 }
 
 func (s *Server) promiseCreate(now int64, origin, id string, timeoutAt int64, param Value, tags map[string]string) ([]byte, error) {
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	if prefix := tags["resonate:prefix"]; strings.Contains(prefix, ".") {
+		return s.respond("promise.create", 400, "resonate:prefix must not contain '.'")
+	}
+	if origin2 := tags["resonate:origin"]; strings.Contains(origin2, ".") {
+		return s.respond("promise.create", 400, "resonate:origin must not contain '.'")
+	}
+	if origin2 := tags["resonate:origin"]; origin2 != "" {
+		if id != origin2 && !strings.HasPrefix(id, origin2+".") {
+			return s.respond("promise.create", 400, "id must be prefixed by resonate:origin")
+		}
+	}
+	if branch := tags["resonate:branch"]; branch != "" {
+		if id != branch && !strings.HasPrefix(id, branch+".") {
+			return s.respond("promise.create", 400, "id must be prefixed by resonate:branch")
+		}
+	}
+	if parent := tags["resonate:parent"]; parent != "" {
+		if id != parent && !strings.HasPrefix(id, parent+".") {
+			return s.respond("promise.create", 400, "id must be prefixed by resonate:parent")
+		}
+	}
 	if existing := s.getPromise(origin, id); existing != nil {
 		s.settleIfExpired(now, existing)
 		return s.respond("promise.create", 200, map[string]any{
 			"promise": s.toPromiseRecord(existing),
 		})
-	}
-	if tags == nil {
-		tags = map[string]string{}
 	}
 
 	if now >= timeoutAt {
@@ -737,9 +737,9 @@ func (s *Server) promiseCreate(now int64, origin, id string, timeoutAt int64, pa
 		Listeners: make(map[string]struct{}),
 	}
 	s.setPromise(origin, id, p)
-	s.setPTimeout(PTimeout{origin, id, timeoutAt})
 
 	if addr := tags["resonate:target"]; addr != "" {
+		s.setPTimeout(PTimeout{id, timeoutAt})
 		delayVal := tags["resonate:delay"]
 		delay := int64(0)
 		deferred := false
@@ -750,10 +750,10 @@ func (s *Server) promiseCreate(now int64, origin, id string, timeoutAt int64, pa
 		}
 		s.setTask(origin, id, &Task{Origin: origin, ID: id, State: "pending", Version: 0, Resumes: make(map[string]struct{})})
 		if deferred {
-			s.setTTimeout(TTimeout{origin, id, 0, delay})
+			s.setTTimeout(TTimeout{id, 0, delay})
 		} else {
-			s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-			s.sendExecute(origin, addr, id, 0)
+			s.setTTimeout(TTimeout{id, 0, now + pendingRetryTTL})
+			s.sendExecute(addr, id, 0)
 		}
 	}
 	return s.respond("promise.create", 200, map[string]any{"promise": s.toPromiseRecord(p)})
@@ -772,7 +772,7 @@ func (s *Server) promiseSettle(now int64, origin, id, state string, value Value)
 	p.Value = value
 	t := now
 	p.SettledAt = &t
-	s.delPTimeout(origin, id)
+	s.delPTimeout(id)
 	s.triggerSettlement(origin, id, now)
 	return s.respond("promise.settle", 200, map[string]any{"promise": s.toPromiseRecord(p)})
 }
@@ -803,8 +803,8 @@ func (s *Server) promiseRegisterCallback(now int64, awaitedOrigin, awaited, awai
 			case "suspended":
 				t.State = "pending"
 				t.Resumes = map[string]struct{}{awaited: {}}
-				s.setTTimeout(TTimeout{awaiterOrigin, awaiter, 0, now + pendingRetryTTL})
-				s.sendExecute(awaiterOrigin, awaiterP.Tags["resonate:target"], awaiter, t.Version)
+				s.setTTimeout(TTimeout{ID: awaiter, Type: 0, Timeout: now + pendingRetryTTL})
+				s.sendExecute(awaiterP.Tags["resonate:target"], awaiter, t.Version)
 			case "pending", "acquired", "halted":
 				t.Resumes[awaited] = struct{}{}
 			}
@@ -845,6 +845,28 @@ func (s *Server) taskCreate(now int64, pid string, ttl int64, promiseOrigin, pro
 	if tags == nil {
 		tags = map[string]string{}
 	}
+	// Mirror PromiseCreateData.Validate() tag rules (Rules 1-5).
+	if prefix := tags["resonate:prefix"]; strings.Contains(prefix, ".") {
+		return s.respond("task.create", 400, "resonate:prefix must not contain '.'")
+	}
+	if origin2 := tags["resonate:origin"]; strings.Contains(origin2, ".") {
+		return s.respond("task.create", 400, "resonate:origin must not contain '.'")
+	}
+	if origin2 := tags["resonate:origin"]; origin2 != "" {
+		if promiseID != origin2 && !strings.HasPrefix(promiseID, origin2+".") {
+			return s.respond("task.create", 400, "id must be prefixed by resonate:origin")
+		}
+	}
+	if branch := tags["resonate:branch"]; branch != "" {
+		if promiseID != branch && !strings.HasPrefix(promiseID, branch+".") {
+			return s.respond("task.create", 400, "id must be prefixed by resonate:branch")
+		}
+	}
+	if parent := tags["resonate:parent"]; parent != "" {
+		if promiseID != parent && !strings.HasPrefix(promiseID, parent+".") {
+			return s.respond("task.create", 400, "id must be prefixed by resonate:parent")
+		}
+	}
 	if existingTask := s.getTask(promiseOrigin, promiseID); existingTask != nil {
 		p := s.getPromise(promiseOrigin, promiseID)
 		s.settleIfExpired(now, p)
@@ -857,7 +879,7 @@ func (s *Server) taskCreate(now int64, pid string, ttl int64, promiseOrigin, pro
 			ttlVal := ttl
 			existingTask.TTL = &ttlVal
 			existingTask.Resumes = make(map[string]struct{})
-			s.setTTimeout(TTimeout{promiseOrigin, promiseID, 1, now + ttl})
+			s.setTTimeout(TTimeout{promiseID, 1, now + ttl})
 			return s.respond("task.create", 200, map[string]any{
 				"task":    s.toTaskRecord(existingTask),
 				"promise": s.toPromiseRecord(p),
@@ -917,12 +939,12 @@ func (s *Server) taskCreate(now int64, pid string, ttl int64, promiseOrigin, pro
 		Listeners: make(map[string]struct{}),
 	}
 	s.setPromise(promiseOrigin, promiseID, p)
-	s.setPTimeout(PTimeout{promiseOrigin, promiseID, timeoutAt})
+	s.setPTimeout(PTimeout{promiseID, timeoutAt})
 
 	ttlVal := ttl
 	task := &Task{Origin: promiseOrigin, ID: promiseID, State: "acquired", Version: 1, PID: pid, TTL: &ttlVal, Resumes: make(map[string]struct{})}
 	s.setTask(promiseOrigin, promiseID, task)
-	s.setTTimeout(TTimeout{promiseOrigin, promiseID, 1, now + ttl})
+	s.setTTimeout(TTimeout{promiseID, 1, now + ttl})
 
 	return s.respond("task.create", 200, map[string]any{
 		"task":    s.toTaskRecord(task),
@@ -954,7 +976,7 @@ func (s *Server) taskAcquire(now int64, origin, id string, version int, pid stri
 	ttlVal := ttl
 	t.TTL = &ttlVal
 	t.Resumes = make(map[string]struct{})
-	s.setTTimeout(TTimeout{origin, id, 1, now + ttl})
+	s.setTTimeout(TTimeout{id, 1, now + ttl})
 	return s.respond("task.acquire", 200, map[string]any{
 		"task":    s.toTaskRecord(t),
 		"promise": s.toPromiseRecord(p),
@@ -981,8 +1003,8 @@ func (s *Server) taskRelease(now int64, origin, id string, version int) ([]byte,
 	t.State = "pending"
 	t.PID = ""
 	t.TTL = nil
-	s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-	s.sendExecute(origin, p.Tags["resonate:target"], id, t.Version)
+	s.setTTimeout(TTimeout{id, 0, now + pendingRetryTTL})
+	s.sendExecute(p.Tags["resonate:target"], id, t.Version)
 	return s.respond("task.release", 200, struct{}{})
 }
 
@@ -1012,7 +1034,7 @@ func (s *Server) taskFulfill(now int64, taskOrigin, taskID string, version int, 
 	actionP.State = state
 	actionP.Value = value
 	actionP.SettledAt = &settled
-	s.delPTimeout(promiseOrigin, promiseID)
+	s.delPTimeout(promiseID)
 	s.triggerSettlement(promiseOrigin, promiseID, now)
 	return s.respond("task.fulfill", 200, map[string]any{"promise": s.toPromiseRecord(actionP)})
 }
@@ -1074,7 +1096,7 @@ func (s *Server) taskSuspend(now int64, taskOrigin, id string, version int, acti
 	t.PID = ""
 	t.TTL = nil
 	t.Resumes = make(map[string]struct{})
-	s.delTTimeout(taskOrigin, id)
+	s.delTTimeout(id)
 	return s.respond("task.suspend", 200, struct{}{})
 }
 
@@ -1092,7 +1114,7 @@ func (s *Server) taskHalt(now int64, origin, id string) ([]byte, error) {
 		t.State = "halted"
 		t.PID = ""
 		t.TTL = nil
-		s.delTTimeout(origin, id)
+		s.delTTimeout(id)
 	}
 	return s.respond("task.halt", 200, struct{}{})
 }
@@ -1111,8 +1133,8 @@ func (s *Server) taskContinue(now int64, origin, id string) ([]byte, error) {
 		return s.respond("task.continue", 409, "Task is not halted")
 	}
 	t.State = "pending"
-	s.setTTimeout(TTimeout{origin, id, 0, now + pendingRetryTTL})
-	s.sendExecute(origin, p.Tags["resonate:target"], id, t.Version)
+	s.setTTimeout(TTimeout{id, 0, now + pendingRetryTTL})
+	s.sendExecute(p.Tags["resonate:target"], id, t.Version)
 	return s.respond("task.continue", 200, struct{}{})
 }
 
@@ -1190,16 +1212,10 @@ func (s *Server) taskFence(now int64, taskOrigin, id string, version int, action
 	var err error
 	switch {
 	case create != nil:
-		innerHeadOrigin, _ := create.Head["resonate:origin"].(string)
-		innerTagOrigin := create.Data.Tags["resonate:origin"]
-		promiseOrigin, err2 := resolveOrigin(innerHeadOrigin, innerTagOrigin, create.Data.ID)
-		if err2 != nil {
-			return s.respond("task.fence", 400, err2.Error())
-		}
+		promiseOrigin := originFromID(create.Data.ID)
 		innerResp, err = s.promiseCreate(now, promiseOrigin, create.Data.ID, create.Data.TimeoutAt, create.Data.Param, create.Data.Tags)
 	case settle != nil:
-		innerHeadOrigin, _ := settle.Head["resonate:origin"].(string)
-		promiseOrigin, _ := resolveOrigin(innerHeadOrigin, "", settle.Data.ID)
+		promiseOrigin := originFromID(settle.Data.ID)
 		innerResp, err = s.promiseSettle(now, promiseOrigin, settle.Data.ID, settle.Data.State, settle.Data.Value)
 	}
 	if err != nil {
@@ -1214,6 +1230,17 @@ func (s *Server) taskFence(now int64, taskOrigin, id string, version int, action
 }
 
 func (s *Server) taskHeartbeat(now int64, pid string, refs [][3]any) ([]byte, error) {
+	if len(refs) == 0 {
+		return s.respond("task.heartbeat", 400, "tasks must not be empty")
+	}
+	if len(refs) > 1 {
+		first := originFromID(refs[0][1].(string))
+		for _, ref := range refs[1:] {
+			if originFromID(ref[1].(string)) != first {
+				return s.respond("task.heartbeat", 400, "all tasks must belong to the same origin")
+			}
+		}
+	}
 	for _, ref := range refs {
 		origin := ref[0].(string)
 		id := ref[1].(string)
@@ -1231,7 +1258,7 @@ func (s *Server) taskHeartbeat(now int64, pid string, refs [][3]any) ([]byte, er
 		if t.TTL != nil {
 			ttl = *t.TTL
 		}
-		s.setTTimeout(TTimeout{origin, id, 1, now + ttl})
+		s.setTTimeout(TTimeout{id, 1, now + ttl})
 	}
 	return s.respond("task.heartbeat", 200, struct{}{})
 }
@@ -1247,6 +1274,9 @@ func (s *Server) scheduleGet(origin, id string) ([]byte, error) {
 }
 
 func (s *Server) scheduleCreate(now int64, origin, id, cronExpr, promiseID string, promiseTimeout int64, promiseParam Value, promiseTags map[string]string) ([]byte, error) {
+	if strings.Contains(id, ".") {
+		return s.respond("schedule.create", 400, "schedule id must not contain '.'")
+	}
 	if existing := s.getSchedule(origin, id); existing != nil {
 		return s.respond("schedule.create", 200, map[string]any{"schedule": s.toScheduleRecord(existing)})
 	}
@@ -1268,7 +1298,7 @@ func (s *Server) scheduleCreate(now int64, origin, id, cronExpr, promiseID strin
 		CreatedAt:      now,
 	}
 	s.setSchedule(origin, id, sc)
-	s.setSTimeout(STimeout{origin, id, nextRunAt, now})
+	s.setSTimeout(STimeout{ID: id, Timeout: nextRunAt, CreatedAt: now})
 	return s.respond("schedule.create", 200, map[string]any{"schedule": s.toScheduleRecord(sc)})
 }
 
@@ -1279,7 +1309,7 @@ func (s *Server) scheduleDelete(origin, id string) ([]byte, error) {
 	if inner := s.schedules[origin]; inner != nil {
 		delete(inner, id)
 	}
-	s.delSTimeout(origin, id)
+	s.delSTimeout(id)
 	return s.respond("schedule.delete", 200, struct{}{})
 }
 
@@ -1305,18 +1335,14 @@ func (s *Server) debugSnap() ([]byte, error) {
 	listeners := make([]ListenerEntry, 0)
 	for _, k := range pKeys {
 		p := s.promises[k.origin][k.id]
-		rec := s.toPromiseRecord(p)
-		o := p.Origin
-		rec.Origin = &o
-		promises = append(promises, rec)
+		promises = append(promises, s.toPromiseRecord(p))
 		awaiters := make([]string, 0, len(p.Callbacks))
 		for awaiter := range p.Callbacks {
 			awaiters = append(awaiters, awaiter)
 		}
 		sort.Strings(awaiters)
 		for _, awaiter := range awaiters {
-			o := p.Origin
-			callbacks = append(callbacks, CallbackEntry{Awaiter: awaiter, Awaited: p.ID, Origin: &o})
+			callbacks = append(callbacks, CallbackEntry{Awaiter: awaiter, Awaited: p.ID})
 		}
 		addrs := make([]string, 0, len(p.Listeners))
 		for addr := range p.Listeners {
@@ -1324,8 +1350,7 @@ func (s *Server) debugSnap() ([]byte, error) {
 		}
 		sort.Strings(addrs)
 		for _, addr := range addrs {
-			o := p.Origin
-			listeners = append(listeners, ListenerEntry{ID: p.ID, Address: addr, Origin: &o})
+			listeners = append(listeners, ListenerEntry{ID: p.ID, Address: addr})
 		}
 	}
 
@@ -1344,19 +1369,16 @@ func (s *Server) debugSnap() ([]byte, error) {
 	})
 	tasks := make([]TaskRecord, 0, len(tKeys))
 	for _, k := range tKeys {
-		rec := s.toTaskRecord(s.tasks[k.origin][k.id])
-		o := k.origin
-		rec.Origin = &o
-		tasks = append(tasks, rec)
+		tasks = append(tasks, s.toTaskRecord(s.tasks[k.origin][k.id]))
 	}
 
 	pTimeouts := make([]TimeoutEntry, len(s.pTimeouts))
 	for i, pt := range s.pTimeouts {
-		pTimeouts[i] = TimeoutEntry{ID: pt.ID, Origin: pt.Origin, Timeout: pt.Timeout}
+		pTimeouts[i] = TimeoutEntry{ID: pt.ID, Timeout: pt.Timeout}
 	}
 	tTimeouts := make([]TaskTimeoutEntry, len(s.tTimeouts))
 	for i, tt := range s.tTimeouts {
-		tTimeouts[i] = TaskTimeoutEntry{ID: tt.ID, Origin: tt.Origin, Type: tt.Type, Timeout: tt.Timeout}
+		tTimeouts[i] = TaskTimeoutEntry{ID: tt.ID, Type: tt.Type, Timeout: tt.Timeout}
 	}
 
 	type schedKey struct{ origin, id string }
@@ -1374,15 +1396,12 @@ func (s *Server) debugSnap() ([]byte, error) {
 	})
 	schedules := make([]ScheduleRecord, 0, len(sKeys))
 	for _, k := range sKeys {
-		rec := s.toScheduleRecord(s.schedules[k.origin][k.id])
-		o := k.origin
-		rec.Origin = &o
-		schedules = append(schedules, rec)
+		schedules = append(schedules, s.toScheduleRecord(s.schedules[k.origin][k.id]))
 	}
 
 	schedTimeouts := make([]TimeoutEntry, len(s.sTimeouts))
 	for i, st := range s.sTimeouts {
-		schedTimeouts[i] = TimeoutEntry{ID: st.ID, Origin: st.Origin, Timeout: st.Timeout}
+		schedTimeouts[i] = TimeoutEntry{ID: st.ID, Timeout: st.Timeout}
 	}
 
 	messages := s.outgoing
@@ -1422,9 +1441,10 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 
 	for _, pt := range s.pTimeouts {
 		if now >= pt.Timeout {
-			p := s.getPromise(pt.Origin, pt.ID)
+			ptOrigin := originFromID(pt.ID)
+			p := s.getPromise(ptOrigin, pt.ID)
 			if p != nil && p.State == "pending" {
-				settles = append(settles, settleRef{pt.Origin, pt.ID, s.timeoutState(p.Tags)})
+				settles = append(settles, settleRef{ptOrigin, pt.ID, s.timeoutState(p.Tags)})
 			}
 		}
 	}
@@ -1432,15 +1452,16 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		if now < tt.Timeout {
 			continue
 		}
+		ttOrigin := originFromID(tt.ID)
 		if tt.Type == 1 {
-			t := s.getTask(tt.Origin, tt.ID)
+			t := s.getTask(ttOrigin, tt.ID)
 			if t != nil && t.State == "acquired" {
-				releases = append(releases, releaseRef{tt.Origin, tt.ID, t.Version})
+				releases = append(releases, releaseRef{ttOrigin, tt.ID, t.Version})
 			}
 		} else {
-			t := s.getTask(tt.Origin, tt.ID)
+			t := s.getTask(ttOrigin, tt.ID)
 			if t != nil && t.State == "pending" {
-				retries = append(retries, retryRef{tt.Origin, tt.ID, t.Version})
+				retries = append(retries, retryRef{ttOrigin, tt.ID, t.Version})
 			}
 		}
 	}
@@ -1456,7 +1477,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		t := p.TimeoutAt
 		p.State = sv.state
 		p.SettledAt = &t
-		s.delPTimeout(sv.origin, sv.id)
+		s.delPTimeout(sv.id)
 		settled = append(settled, settledRef{sv.origin, sv.id})
 	}
 
@@ -1480,9 +1501,9 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		t.State = "pending"
 		t.PID = ""
 		t.TTL = nil
-		s.setTTimeout(TTimeout{r.origin, r.id, 0, now + pendingRetryTTL})
+		s.setTTimeout(TTimeout{r.id, 0, now + pendingRetryTTL})
 		p := s.getPromise(r.origin, r.id)
-		s.sendExecute(r.origin, p.Tags["resonate:target"], r.id, t.Version)
+		s.sendExecute(p.Tags["resonate:target"], r.id, t.Version)
 	}
 
 	// Task retries
@@ -1491,9 +1512,9 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 		if t == nil || t.State != "pending" {
 			continue
 		}
-		s.setTTimeout(TTimeout{r.origin, r.id, 0, now + pendingRetryTTL})
+		s.setTTimeout(TTimeout{r.id, 0, now + pendingRetryTTL})
 		p := s.getPromise(r.origin, r.id)
-		s.sendExecute(r.origin, p.Tags["resonate:target"], r.id, t.Version)
+		s.sendExecute(p.Tags["resonate:target"], r.id, t.Version)
 	}
 
 	// Schedule timeouts — sort by (timeout, id) for determinism
@@ -1505,7 +1526,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 	var due []stEntry
 	for _, st := range s.sTimeouts {
 		if now >= st.Timeout {
-			due = append(due, stEntry{st.Origin, st.ID, st.Timeout})
+			due = append(due, stEntry{originFromID(st.ID), st.ID, st.Timeout})
 		}
 	}
 	sort.Slice(due, func(i, j int) bool {
@@ -1562,7 +1583,7 @@ func (s *Server) debugTick(now int64) ([]byte, error) {
 			sc.LastRunAt = &lastRun
 			currentTimeout = nextT
 		}
-		s.setSTimeout(STimeout{entry.origin, entry.id, currentTimeout, sc.CreatedAt})
+		s.setSTimeout(STimeout{ID: entry.id, Timeout: currentTimeout, CreatedAt: sc.CreatedAt})
 	}
 
 	return s.respond("debug.tick", 200, []any{})
@@ -1579,7 +1600,7 @@ func (s *Server) settleIfExpired(now int64, p *Promise) bool {
 	p.State = s.timeoutState(p.Tags)
 	t := p.TimeoutAt
 	p.SettledAt = &t
-	s.delPTimeout(p.Origin, p.ID)
+	s.delPTimeout(p.ID)
 	s.triggerSettlement(p.Origin, p.ID, now)
 	return true
 }
@@ -1599,7 +1620,7 @@ func (s *Server) triggerFulfilled(origin, promiseID string) {
 	t.PID = ""
 	t.TTL = nil
 	t.Resumes = make(map[string]struct{})
-	s.delTTimeout(origin, promiseID)
+	s.delTTimeout(promiseID)
 }
 
 func (s *Server) triggerCallbacks(origin, promiseID string, now int64) {
@@ -1629,8 +1650,8 @@ func (s *Server) triggerCallbacks(origin, promiseID string, now int64) {
 		case "suspended":
 			t.State = "pending"
 			t.Resumes = map[string]struct{}{promiseID: {}}
-			s.setTTimeout(TTimeout{awaiterOrigin, awaiterID, 0, now + pendingRetryTTL})
-			s.sendExecute(awaiterOrigin, awaiterP.Tags["resonate:target"], awaiterID, t.Version)
+			s.setTTimeout(TTimeout{ID: awaiterID, Type: 0, Timeout: now + pendingRetryTTL})
+			s.sendExecute(awaiterP.Tags["resonate:target"], awaiterID, t.Version)
 		case "pending", "acquired", "halted":
 			t.Resumes[promiseID] = struct{}{}
 		}
@@ -1659,7 +1680,7 @@ func (s *Server) triggerListeners(origin, promiseID string) {
 	p.Listeners = make(map[string]struct{})
 }
 
-func (s *Server) sendExecute(origin, address, taskID string, version int) {
+func (s *Server) sendExecute(address, taskID string, version int) {
 	msg, _ := json.Marshal(struct {
 		Kind string   `json:"kind"`
 		Head struct{} `json:"head"`
@@ -1668,18 +1689,16 @@ func (s *Server) sendExecute(origin, address, taskID string, version int) {
 				ID      string `json:"id"`
 				Version int    `json:"version"`
 			} `json:"task"`
-			Origin string `json:"origin"`
 		} `json:"data"`
 	}{Kind: "execute", Data: struct {
 		Task struct {
 			ID      string `json:"id"`
 			Version int    `json:"version"`
 		} `json:"task"`
-		Origin string `json:"origin"`
 	}{Task: struct {
 		ID      string `json:"id"`
 		Version int    `json:"version"`
-	}{ID: taskID, Version: version}, Origin: origin}})
+	}{ID: taskID, Version: version}}})
 
 	for i, m := range s.outgoing {
 		var k struct {
@@ -1767,7 +1786,7 @@ func (s *Server) toTaskRecord(t *Task) TaskRecord {
 func (s *Server) toScheduleRecord(sc *Schedule) ScheduleRecord {
 	nextRunAt := int64(0)
 	for _, st := range s.sTimeouts {
-		if st.Origin == sc.Origin && st.ID == sc.ID {
+		if st.ID == sc.ID {
 			nextRunAt = st.Timeout
 			break
 		}
@@ -1789,7 +1808,7 @@ func (s *Server) toScheduleRecord(sc *Schedule) ScheduleRecord {
 
 func (s *Server) setPTimeout(pt PTimeout) {
 	for i, e := range s.pTimeouts {
-		if e.Origin == pt.Origin && e.ID == pt.ID {
+		if e.ID == pt.ID {
 			s.pTimeouts[i] = pt
 			return
 		}
@@ -1797,9 +1816,9 @@ func (s *Server) setPTimeout(pt PTimeout) {
 	s.pTimeouts = append(s.pTimeouts, pt)
 }
 
-func (s *Server) delPTimeout(origin, id string) {
+func (s *Server) delPTimeout(id string) {
 	for i, e := range s.pTimeouts {
-		if e.Origin == origin && e.ID == id {
+		if e.ID == id {
 			s.pTimeouts = append(s.pTimeouts[:i], s.pTimeouts[i+1:]...)
 			return
 		}
@@ -1808,7 +1827,7 @@ func (s *Server) delPTimeout(origin, id string) {
 
 func (s *Server) setTTimeout(tt TTimeout) {
 	for i, e := range s.tTimeouts {
-		if e.Origin == tt.Origin && e.ID == tt.ID {
+		if e.ID == tt.ID {
 			s.tTimeouts[i] = tt
 			return
 		}
@@ -1816,9 +1835,9 @@ func (s *Server) setTTimeout(tt TTimeout) {
 	s.tTimeouts = append(s.tTimeouts, tt)
 }
 
-func (s *Server) delTTimeout(origin, id string) {
+func (s *Server) delTTimeout(id string) {
 	for i, e := range s.tTimeouts {
-		if e.Origin == origin && e.ID == id {
+		if e.ID == id {
 			s.tTimeouts = append(s.tTimeouts[:i], s.tTimeouts[i+1:]...)
 			return
 		}
@@ -1827,7 +1846,7 @@ func (s *Server) delTTimeout(origin, id string) {
 
 func (s *Server) setSTimeout(st STimeout) {
 	for i, e := range s.sTimeouts {
-		if e.Origin == st.Origin && e.ID == st.ID {
+		if e.ID == st.ID {
 			s.sTimeouts[i] = st
 			return
 		}
@@ -1835,9 +1854,9 @@ func (s *Server) setSTimeout(st STimeout) {
 	s.sTimeouts = append(s.sTimeouts, st)
 }
 
-func (s *Server) delSTimeout(origin, id string) {
+func (s *Server) delSTimeout(id string) {
 	for i, e := range s.sTimeouts {
-		if e.Origin == origin && e.ID == id {
+		if e.ID == id {
 			s.sTimeouts = append(s.sTimeouts[:i], s.sTimeouts[i+1:]...)
 			return
 		}

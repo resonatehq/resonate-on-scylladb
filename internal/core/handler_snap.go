@@ -26,7 +26,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 	// ListenerEntries, and TaskRecords (for rows where target is set).
 	{
 		var (
-			id, origin, target, state        string
+			id, target, state                string
 			paramHeaders, valueHeaders, tags map[string]string
 			paramData, valueData             string
 			timeoutAt, createdAt             int64
@@ -38,7 +38,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			taskResumes                      []string
 		)
 		iter := h.Session.Query(
-			`SELECT id, origin, target, state,
+			`SELECT id, target, state,
 			        param_headers, param_data, value_headers, value_data,
 			        tags, timeout_at, created_at, settled_at,
 			        callbacks, listeners,
@@ -47,7 +47,7 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 		).Iter()
 		yield(LabelDebugSnapScanPromises)
 		for iter.Scan(
-			&id, &origin, &target, &state,
+			&id, &target, &state,
 			&paramHeaders, &paramData, &valueHeaders, &valueData,
 			&tags, &timeoutAt, &createdAt, &settledAt,
 			&cbSet, &lnSet,
@@ -56,8 +56,6 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			if tags == nil {
 				tags = map[string]string{}
 			}
-			o := origin
-			originPtr := &o
 			promises = append(promises, PromiseRecord{
 				ID:        id,
 				State:     state,
@@ -67,13 +65,12 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 				TimeoutAt: timeoutAt,
 				CreatedAt: createdAt,
 				SettledAt: settledAt,
-				Origin:    originPtr,
 			})
 			for _, awaiterID := range cbSet {
-				callbacks = append(callbacks, CallbackEntry{Awaiter: awaiterID, Awaited: id, Origin: originPtr})
+				callbacks = append(callbacks, CallbackEntry{Awaiter: awaiterID, Awaited: id})
 			}
 			for _, addr := range lnSet {
-				listeners = append(listeners, ListenerEntry{ID: id, Address: addr, Origin: originPtr})
+				listeners = append(listeners, ListenerEntry{ID: id, Address: addr})
 			}
 			if target != "" {
 				resumesJSON := json.RawMessage("[]")
@@ -88,7 +85,6 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 					Version: taskVersion,
 					Resumes: resumesJSON,
 					PID:     taskPID,
-					Origin:  originPtr,
 				}
 				if taskTTL != nil {
 					ttl := int(*taskTTL)
@@ -107,16 +103,14 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 		var (
 			ptTimeout int64
 			ptID      string
-			ptOrigin  string
 		)
 		iter := h.Session.Query(
-			`SELECT timeout_at, promise_id, origin FROM promise_timeouts`,
+			`SELECT timeout_at, promise_id FROM promise_timeouts`,
 		).Iter()
 		yield(LabelDebugSnapScanPromiseTimeouts)
-		for iter.Scan(&ptTimeout, &ptID, &ptOrigin) {
+		for iter.Scan(&ptTimeout, &ptID) {
 			promiseTimeouts = append(promiseTimeouts, TimeoutEntry{
 				ID:      ptID,
-				Origin:  ptOrigin,
 				Timeout: ptTimeout,
 			})
 		}
@@ -131,16 +125,14 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 			ttTimeout int64
 			ttType    int8
 			ttID      string
-			ttOrigin  string
 		)
 		iter := h.Session.Query(
-			`SELECT timeout_at, timeout_type, task_id, origin FROM task_timeouts`,
+			`SELECT timeout_at, timeout_type, task_id FROM task_timeouts`,
 		).Iter()
 		yield(LabelDebugSnapScanTaskTimeouts)
-		for iter.Scan(&ttTimeout, &ttType, &ttID, &ttOrigin) {
+		for iter.Scan(&ttTimeout, &ttType, &ttID) {
 			taskTimeouts = append(taskTimeouts, TaskTimeoutEntry{
 				ID:      ttID,
-				Origin:  ttOrigin,
 				Type:    int(ttType),
 				Timeout: ttTimeout,
 			})
@@ -153,34 +145,32 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 	// ── schedules ─────────────────────────────────────────────────────────────
 	{
 		var (
-			sID, sOrigin, sCron, sPromiseID string
-			sPromiseTimeout                 int64
-			sParamHeaders                   map[string]string
-			sParamData                      string
-			sPromiseTags                    map[string]string
-			sNextRunAt, sCreatedAt          int64
-			sLastRunAt                      *int64
-			sToken                          gocql.UUID
+			sID, sCron, sPromiseID string
+			sPromiseTimeout        int64
+			sParamHeaders          map[string]string
+			sParamData             string
+			sPromiseTags           map[string]string
+			sNextRunAt, sCreatedAt int64
+			sLastRunAt             *int64
+			sToken                 gocql.UUID
 		)
 		iter := h.Session.Query(
-			`SELECT id, origin, cron, promise_id, promise_timeout,
+			`SELECT id, cron, promise_id, promise_timeout,
 			        promise_param_headers, promise_param_data, promise_tags,
 			        next_run_at, last_run_at, created_at, create_token
 			 FROM schedules`,
 		).Iter()
 		yield(LabelDebugSnapScanSchedules)
 		for iter.Scan(
-			&sID, &sOrigin, &sCron, &sPromiseID, &sPromiseTimeout,
+			&sID, &sCron, &sPromiseID, &sPromiseTimeout,
 			&sParamHeaders, &sParamData, &sPromiseTags,
 			&sNextRunAt, &sLastRunAt, &sCreatedAt, &sToken,
 		) {
 			if sPromiseTags == nil {
 				sPromiseTags = map[string]string{}
 			}
-			o := sOrigin
 			schedules = append(schedules, ScheduleRecord{
 				ID:             sID,
-				Origin:         &o,
 				Cron:           sCron,
 				PromiseID:      sPromiseID,
 				PromiseTimeout: sPromiseTimeout,
@@ -201,17 +191,15 @@ func (h *Handler) DebugSnap(head RequestHead, now int64, yield func(string)) Res
 	{
 		var (
 			stTimeout int64
-			stOrigin  string
 			stID      string
 		)
 		iter := h.Session.Query(
-			`SELECT timeout_at, origin, schedule_id FROM schedule_timeouts`,
+			`SELECT timeout_at, schedule_id FROM schedule_timeouts`,
 		).Iter()
 		yield(LabelDebugSnapScanScheduleTimeouts)
-		for iter.Scan(&stTimeout, &stOrigin, &stID) {
+		for iter.Scan(&stTimeout, &stID) {
 			scheduleTimeouts = append(scheduleTimeouts, TimeoutEntry{
 				ID:      stID,
-				Origin:  stOrigin,
 				Timeout: stTimeout,
 			})
 		}
