@@ -84,6 +84,17 @@ func (h *Handler) TaskCreate(head RequestHead, req TaskCreateData, now int64, yi
 	}
 	target := inner.Tags["resonate:target"]
 
+	// The carried action must name a resonate:target — a task with no address
+	// could never be dispatched. A malformed request, rejected with highest
+	// precedence: before the lookup, so it applies on existing ids too.
+	if target == "" {
+		return Res[string]{
+			Kind: "task.create",
+			Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
+			Data: "Action must carry a resonate:target tag",
+		}
+	}
+
 	tags := inner.Tags
 	if tags == nil {
 		tags = map[string]string{}

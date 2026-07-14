@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gocql/gocql"
 )
@@ -668,6 +669,18 @@ func (h *Handler) PromiseRegisterListener(head RequestHead, req PromiseRegisterL
 	awaitedID := req.Awaited
 	awaitedOrigin, _ := resolveOrigin(head.Origin, "", awaitedID)
 	address := req.Address
+
+	// An undeliverable address is a malformed request, rejected before any
+	// state is consulted (400 precedes the 404 on a missing promise). Valid:
+	// http(s)://..., or poll://... carrying an @group (poll://any@default).
+	if !(strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") ||
+		(strings.HasPrefix(address, "poll://") && strings.Contains(address, "@"))) {
+		return Res[string]{
+			Kind: "promise.register_listener",
+			Head: ResponseHead{CorrID: head.CorrID, Status: 400, Version: head.Version},
+			Data: "Invalid listener address",
+		}
+	}
 
 	// 1. Read awaited promise (may eagerly timeout).
 	row, err := h.readAndTryTimeout(awaitedID, awaitedOrigin, now, yield)
