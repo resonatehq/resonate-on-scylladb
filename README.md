@@ -10,10 +10,12 @@ A Go implementation of the [Resonate](https://resonatehq.io) server protocol bac
 ## Run
 
 ```sh
-docker compose up
+docker compose --profile server up
 ```
 
 The server listens on `:8001`. ScyllaDB schema is applied automatically on startup.
+
+The profile is not optional. The `server` service in `docker-compose.yaml` declares `profiles: [server]`, so a bare `docker compose up` starts ScyllaDB and nothing else.
 
 ## Configuration
 
