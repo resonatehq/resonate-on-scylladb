@@ -11,6 +11,16 @@ Reach for it when you already run ScyllaDB and would rather not stand up a secon
 
 This repository is source-available under BUSL-1.1, not Apache-2.0. Development, testing, and evaluation are free; production use needs a commercial license until the Change Date. See [License](#license).
 
+- [Read the docs for this provider](https://docs.resonatehq.io/deploy/providers/scylladb)
+- [Evaluate Resonate for your next project](https://docs.resonatehq.io/evaluate/)
+- [Example application library](https://github.com/resonatehq-examples)
+- [Distributed Async Await — the concepts that power Resonate](https://www.distributed-async-await.io/)
+- [Join the Discord](https://resonatehq.io/discord)
+- [Subscribe to the Journal](https://journal.resonatehq.io/subscribe)
+- [Follow on X](https://x.com/resonatehqio)
+- [Follow on LinkedIn](https://www.linkedin.com/company/resonatehqio)
+- [Subscribe on YouTube](https://www.youtube.com/@resonatehqio)
+
 ## Requirements
 
 - A ScyllaDB cluster reachable over CQL
@@ -137,6 +147,14 @@ Read this before you plan a production rollout.
 - **Behavior under database-layer failure is an open question.** A repair path exists in the code but is not wired into the running server, so a lost node or a partition is not something the current tests characterize.
 - **Known bug:** deleting a schedule can leave stale rows in `schedule_timeouts`.
 - **The schema is not settled.** This is a young repository. Check open pull requests before you build tooling against the column layout.
+
+## Community
+
+- [Discord](https://resonatehq.io/discord)
+- [X](https://x.com/resonatehqio)
+- [LinkedIn](https://www.linkedin.com/company/resonatehqio)
+- [YouTube](https://www.youtube.com/@resonatehqio)
+- [Journal](https://journal.resonatehq.io)
 
 ## License
 
