@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.png">
     <source media="(prefers-color-scheme: light)" srcset="./assets/banner-light.png">
-    <img alt="Resonate on ScyllaDB — Resonate" src="./assets/banner-dark.png">
+    <img alt="Resonate on ScyllaDB" src="./assets/banner-dark.png">
   </picture>
 </p>
 
@@ -13,7 +13,7 @@
 
 ## About this component
 
-A Go implementation of the [Resonate](https://resonatehq.io) server protocol backed by [ScyllaDB](https://www.scylladb.com/). It speaks the same HTTP/JSON protocol as the core Resonate server, so your application code and your SDK stay as they are — you point `RESONATE_URL` at this instead.
+A Go implementation of the [Resonate](https://resonatehq.io) server protocol backed by [ScyllaDB](https://www.scylladb.com/). It speaks the same HTTP/JSON protocol as the core Resonate server, so your application code and your SDK stay as they are — you point `RESONATE_URL` at this instead. The one exception is search, which isn't implemented; see [What's not there yet](#whats-not-there-yet).
 
 Reach for it when you already run ScyllaDB and would rather not stand up a second database for durable execution. If you don't already run ScyllaDB, run the core server on Postgres — it is the reference implementation and the default recommendation.
 
@@ -41,7 +41,7 @@ This repository is source-available under BUSL-1.1, not Apache-2.0. Development,
 docker compose --profile server up
 ```
 
-The server listens on `:8001`. ScyllaDB schema is applied automatically on startup.
+The server listens on `:8001`. The bundled stack runs the server with `--debug`, which creates the keyspace for you — and drops it again on every restart. Any other deployment provisions the schema itself; see [Configuration](#configuration).
 
 The profile is not optional. The `server` service in `docker-compose.yaml` declares `profiles: [server]`, so a bare `docker compose up` starts ScyllaDB and nothing else.
 
@@ -53,9 +53,11 @@ This provider is drop-in. It serves the same HTTP/JSON protocol as the core serv
 RESONATE_URL=http://localhost:8001
 ```
 
-Your workflow code doesn't change either. If you are moving off the core server, the URL is the whole migration.
+Your workflow code doesn't change either — the only thing that moves is `RESONATE_URL`.
 
-The protocol version is `2026-04-01`. The server exposes three routes: `POST /` for protocol requests, `GET /poll/{group}/{id}` for long-poll delivery, and `GET /health`.
+Protocol requests go to `/`, task delivery streams from `GET /poll/{group}/{id}` as server-sent events, and `GET /health` is the health check. The RPC route is unconstrained, so any other path or method also lands there and answers `400` rather than `404` — don't probe it for capability.
+
+Requests carry a protocol version of `2026-04-01` in the header. The server requires the field to be present but does not check its value.
 
 ## Configuration
 
@@ -79,6 +81,7 @@ Example `resonate.yaml`:
 server:
   addr: ":8001"
   debug: false
+  log-level: info
 
 scylladb:
   hosts:
@@ -107,15 +110,16 @@ worker:
 | Variable | Description |
 |---|---|
 | `SERVER_ADDR` | Server listen address |
-| `SERVER_DEBUG` | Debug mode |
+| `SERVER_DEBUG` | Debug mode — **drops and recreates the keyspace on connect** |
+| `SERVER_LOG_LEVEL` | `debug`, `info`, `warn`, or `error` (default `info`); any other value is a fatal startup error |
 | `SCYLLADB_HOSTS` | Comma-separated seed hosts |
-| `SCYLLADB_PORT` | CQL port |
+| `SCYLLADB_PORT` | CQL port. Set it to `9142` for a TLS cluster — putting the port in `SCYLLADB_HOSTS` isn't enough, because gossip-discovered peers are dialled on this value |
 | `SCYLLADB_USERNAME` | Username |
 | `SCYLLADB_PASSWORD` | Password |
 | `SCYLLADB_TLS_ENABLED` | Enable TLS |
 | `SCYLLADB_TLS_INSECURE` | Skip certificate verification |
-| `SCYLLADB_KEYSPACE` | Keyspace name |
-| `SCYLLADB_REPLICATION` | Replication clause for schema creation |
+| `SCYLLADB_KEYSPACE` | Keyspace name (default `resonate`) |
+| `SCYLLADB_REPLICATION` | Replication clause used when the server creates the keyspace — **debug mode only**, ignored otherwise |
 | `TIMEOUTS_BUCKET_WIDTH` | Timeout bucket width (e.g. `1h`, `30m`) |
 | `TIMEOUTS_BUCKET_LOOKBACK` | Past buckets to scan |
 | `TIMEOUTS_SHARDS` | Shard count |
@@ -129,6 +133,17 @@ Two of these will hurt you if you set them casually.
 **`TIMEOUTS_SHARDS` is baked into the partition key.** The shard is a hash of the record id, stored in the partition key of every timeout row. Every instance must use the same value. Changing it on a populated cluster strands existing rows in partitions no server scans, and durable timers stop firing without an error.
 
 Outside debug mode the server applies no DDL at all — it opens a keyspace-bound session and assumes the schema is there. For any real deployment you provision the keyspace yourself, with a replication strategy you chose deliberately.
+
+## What's not there yet
+
+Read this before you plan a production rollout.
+
+- **No production reference deployments.** Nobody is running this in production yet.
+- **Search is unimplemented.** `task.search` returns `501`. `promise.search` and `schedule.search` aren't recognized kinds at all, so they come back as `400` with `unknown kind: <kind>` rather than `501` — worth knowing if you plan to probe for capability. Anything that queries promises by tag will not work.
+- **No authentication.** An auth hook exists in the code, but nothing wires it up and its check is an unimplemented stub, so every request that reaches the server is served. Put it behind your own network controls.
+- **Behaviour under degraded quorum is uncharacterised.** Node loss and partitions are ScyllaDB's own problem and it handles them. What the test suites don't cover is how this server behaves while a quorum is unavailable, and a repair path exists in the code without being wired into the running server.
+- **Known bug:** deleting a schedule can leave stale rows in `schedule_timeouts`.
+- **The column layout is not a compatibility surface yet.** This is a young repository and the schema can still change.
 
 ## How it's tested
 
@@ -145,18 +160,7 @@ docker compose -f docker-compose.test.yml -p resonate-kill --profile kill up --b
 docker compose -f docker-compose.test.yml -p resonate-linz --profile linearizability up --build --abort-on-container-exit --exit-code-from tester-linearizability; docker compose -p resonate-linz down
 ```
 
-The kill tests abort an operation at every cooperative yield checkpoint — reads, cursor scans, non-transactional pre-inserts, lightweight-transaction commits, rollbacks, cleanups, batches — a thousand iterations by default, and check named state invariants on what is left. Linearizability is checked with the [Porcupine](https://github.com/anishathalye/porcupine) model checker against the same oracle the diff tests use.
-
-## What's not there yet
-
-Read this before you plan a production rollout.
-
-- **No production reference deployments.** Nobody is running this in production yet.
-- **Search is unimplemented.** `task.search` returns `501`. `promise.search` and `schedule.search` aren't recognized kinds at all, so they come back as `400` with `unknown kind: <kind>` rather than `501` — worth knowing if you plan to probe for capability. Anything that queries promises by tag will not work.
-- **No authentication.** An auth hook exists in the code, but nothing wires it up and its check is an unimplemented stub, so every request that reaches the server is served. Put it behind your own network controls.
-- **Behavior under database-layer failure is an open question.** A repair path exists in the code but is not wired into the running server, so a lost node or a partition is not something the current tests characterize.
-- **Known bug:** deleting a schedule can leave stale rows in `schedule_timeouts`.
-- **The schema is not settled.** This is a young repository. Check open pull requests before you build tooling against the column layout.
+The kill tests abort a randomly chosen fiber at a cooperative yield checkpoint, with probability 0.3 per scheduler tick, a thousand iterations by default, and check named state invariants on what is left. Linearizability is checked with the [Porcupine](https://github.com/anishathalye/porcupine) model checker against the same oracle the diff tests use.
 
 ## Community
 
