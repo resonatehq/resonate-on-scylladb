@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/banner-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/banner-light.png">
+    <img alt="Resonate on ScyllaDB — Resonate" src="./assets/banner-dark.png">
+  </picture>
+</p>
+
 # Resonate on ScyllaDB
 
 [![ci](https://github.com/resonatehq/resonate-on-scylladb/actions/workflows/ci.yml/badge.svg)](https://github.com/resonatehq/resonate-on-scylladb/actions/workflows/ci.yml)
