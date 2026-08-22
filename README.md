@@ -35,6 +35,8 @@ RESONATE_URL=http://localhost:8001
 
 Your workflow code doesn't change either. If you are moving off the core server, the URL is the whole migration.
 
+The protocol version is `2026-04-01`. The server exposes three routes: `POST /` for protocol requests, `GET /poll/{group}/{id}` for long-poll delivery, and `GET /health`.
+
 ## Configuration
 
 `resonate serve` accepts configuration from, in priority order:
